@@ -1,10 +1,10 @@
 import { useState, useRef, useCallback } from 'react';
 import { Microscope, Upload, ChevronDown, ChevronUp, RotateCcw } from 'lucide-react';
 
-import type { Colony, RegionEntry, SelectionRegion, DetectionParams } from './types';
-import { DEFAULT_PARAMS } from './types';
+import type { Colony, RegionEntry, SelectionRegion, SelectionTool, DetectionParams, GridParams } from './types';
+import { DEFAULT_PARAMS, DEFAULT_GRID } from './types';
 import { loadImageFile, loadImageElement } from './utils/imageLoader';
-import { detectColoniesInRegion } from './utils/colonyDetection';
+import { detectColoniesInRegion, detectDilutionSpots } from './utils/colonyDetection';
 import { useTrainingData } from './hooks/useTrainingData';
 
 import { ImageUploader } from './components/ImageUploader';
@@ -33,6 +33,8 @@ export default function App() {
 
   // ── UI state ────────────────────────────────────────────────────────────
   const [mode, setMode]                 = useState<ViewerMode>('select');
+  const [selectionKind, setSelectionKind] = useState<SelectionTool>('sphere');
+  const [gridParams, setGridParams]       = useState<GridParams>(DEFAULT_GRID);
   const [tableExpanded, setTableExpanded] = useState(true);
 
   // ── Training ───────────────────────────────────────────────────────────
@@ -56,32 +58,174 @@ export default function App() {
     }
   }, []);
 
-  // ── Add a region (drawn on canvas) ─────────────────────────────────────
-  const handleAddRegion = useCallback((raw: Omit<SelectionRegion, 'id' | 'label'>) => {
+  // ── Add a sphere region (drawn on canvas) ──────────────────────────────
+  const handleAddSphere = useCallback((raw: { cx: number; cy: number; radius: number }) => {
     if (!imgElRef.current) return;
     const el = imgElRef.current;
     const id = `region-${++regionCounter}`;
     const newRegion: SelectionRegion = {
       ...raw,
       id,
+      kind: 'sphere',
       label: makeRegionLabel(regionCounter - 1),
     };
     const effectiveParams = getLearnedParams(params);
     const colonies = detectColoniesInRegion(el, newRegion, effectiveParams);
 
     setEntries(prev => [...prev, {
-      region:        newRegion,
+      region: newRegion,
       dilutionFactor: 1000,
-      volumeMl:      0.1,
+      volumeMl: 0.1,
       colonies,
-      confirmed:     false,
+      confirmed: false,
     }]);
+    setMode('review');
+  }, [params, getLearnedParams]);
+
+  // ── Add a lasso (freehand polygon) region ──────────────────────────────
+  const handleAddLasso = useCallback((polygon: { x: number; y: number }[]) => {
+    if (!imgElRef.current) return;
+    const el = imgElRef.current;
+    let sx = 0, sy = 0, minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of polygon) {
+      sx += p.x; sy += p.y;
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const cx = sx / polygon.length;
+    const cy = sy / polygon.length;
+    const radius = Math.max((maxX - minX) / 2, (maxY - minY) / 2);
+    const id = `region-${++regionCounter}`;
+    const newRegion: SelectionRegion = {
+      id,
+      kind: 'lasso',
+      cx, cy, radius,
+      polygon,
+      label: makeRegionLabel(regionCounter - 1),
+    };
+    const effectiveParams = getLearnedParams(params);
+    const colonies = detectColoniesInRegion(el, newRegion, effectiveParams);
+
+    setEntries(prev => [...prev, {
+      region: newRegion,
+      dilutionFactor: 1000,
+      volumeMl: 0.1,
+      colonies,
+      confirmed: false,
+    }]);
+    setMode('review');
+  }, [params, getLearnedParams]);
+
+  // ── Manual dilution grid: drop rows×cols sphere regions inside a bounding rect ──
+  const handleAddGrid = useCallback((
+    rect: { x0: number; y0: number; x1: number; y1: number },
+    gp: GridParams,
+  ) => {
+    if (!imgElRef.current) return;
+    const el = imgElRef.current;
+    const rx = Math.min(rect.x0, rect.x1);
+    const ry = Math.min(rect.y0, rect.y1);
+    const rw = Math.abs(rect.x1 - rect.x0);
+    const rh = Math.abs(rect.y1 - rect.y0);
+    const rows = Math.max(1, gp.rows);
+    const cols = Math.max(1, gp.cols);
+    const cellW = rw / cols;
+    const cellH = rh / rows;
+    const radius = (Math.min(cellW, cellH) / 2) * gp.sphereScale;
+    if (radius < 4) return;
+
+    const effectiveParams = getLearnedParams(params);
+
+    setEntries(prev => {
+      const adds: RegionEntry[] = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const cx = rx + cellW * (c + 0.5);
+          const cy = ry + cellH * (r + 0.5);
+          const id = `region-${++regionCounter}`;
+          // Default dilution: 10^col so a row reads 10¹ → 10⁶ L→R
+          const dilutionFactor = Math.pow(10, c + 1);
+          const region: SelectionRegion = {
+            id,
+            kind: 'sphere',
+            cx, cy, radius,
+            label: rows > 1 ? `R${r + 1}·10⁻${c + 1}` : `10⁻${c + 1}`,
+          };
+          const colonies = detectColoniesInRegion(el, region, effectiveParams);
+          adds.push({
+            region,
+            dilutionFactor,
+            volumeMl: 0.1,
+            colonies,
+            confirmed: false,
+          });
+        }
+      }
+      return [...prev, ...adds];
+    });
+    setMode('review');
+  }, [params, getLearnedParams]);
+
+  // ── Auto grid-fit: detect dilution-series spots and create sphere regions ─
+  const handleAutoGridFit = useCallback(() => {
+    if (!imgElRef.current) return;
+    const el = imgElRef.current;
+    const spots = detectDilutionSpots(el);
+    if (spots.length === 0) {
+      alert('Could not detect any spots automatically. Try drawing regions manually.');
+      return;
+    }
+    const effectiveParams = getLearnedParams(params);
+
+    setEntries(prev => {
+      const add: RegionEntry[] = spots.map((s, i) => {
+        const id = `region-${++regionCounter}`;
+        // Grow by 15 % so the entire spot sits comfortably inside
+        const r = s.radius * 1.15;
+        const region: SelectionRegion = {
+          id,
+          kind: 'sphere',
+          cx: s.cx,
+          cy: s.cy,
+          radius: r,
+          label: `Spot ${prev.length + i + 1}`,
+        };
+        const colonies = detectColoniesInRegion(el, region, effectiveParams);
+        return {
+          region,
+          dilutionFactor: 1000,
+          volumeMl: 0.1,
+          colonies,
+          confirmed: false,
+        };
+      });
+      return [...prev, ...add];
+    });
     setMode('review');
   }, [params, getLearnedParams]);
 
   // ── Delete a region ────────────────────────────────────────────────────
   const handleDeleteRegion = useCallback((regionId: string) => {
     setEntries(prev => prev.filter(e => e.region.id !== regionId));
+  }, []);
+
+  // ── Move a region (drag-reposition) ────────────────────────────────────
+  // Shifts the region centre (and polygon, if lasso) plus every colony it owns
+  // by the same (dx, dy) so the user can relocate a mis-placed selection.
+  const handleMoveRegion = useCallback((regionId: string, dx: number, dy: number) => {
+    setEntries(prev => prev.map(e => {
+      if (e.region.id !== regionId) return e;
+      const region: SelectionRegion = {
+        ...e.region,
+        cx: e.region.cx + dx,
+        cy: e.region.cy + dy,
+        polygon: e.region.polygon?.map(p => ({ x: p.x + dx, y: p.y + dy })),
+      };
+      const colonies = e.colonies.map(c => ({ ...c, cx: c.cx + dx, cy: c.cy + dy }));
+      return { ...e, region, colonies };
+    }));
   }, []);
 
   // ── Toggle colony status + record training data ────────────────────────
@@ -97,7 +241,6 @@ export default function App() {
                : 'auto',
       };
 
-      // Record training feedback
       if (next.status === 'confirmed') {
         recordAccepted([{ area: col.area, circularity: col.circularity, brightness: col.brightness }]);
       } else if (next.status === 'rejected') {
@@ -113,7 +256,6 @@ export default function App() {
 
   // ── Add manual colony ──────────────────────────────────────────────────
   const handleAddManual = useCallback((cx: number, cy: number) => {
-    // Assign to the first region that contains this point, or first region
     setEntries(prev => {
       if (prev.length === 0) return prev;
       const ownerIdx = prev.findIndex(e => {
@@ -132,6 +274,8 @@ export default function App() {
         circularity: 0.8,
         brightness:  180,
         confidence:  1,
+        edgeSharpness: 0.3,
+        lbpVariance:   0.6,
         status:      'confirmed',
         regionId,
       };
@@ -202,8 +346,8 @@ export default function App() {
       <header className="flex items-center justify-between px-5 py-3 bg-slate-800/90 border-b border-slate-700 shrink-0">
         <div className="flex items-center gap-2.5">
           <Microscope className="w-6 h-6 text-blue-400" />
-          <span className="font-semibold text-slate-100 text-lg tracking-tight">CFU Colony Counter</span>
-          <span className="hidden sm:inline text-xs text-slate-500 ml-1">— automated plate analysis</span>
+          <span className="font-semibold text-slate-100 text-lg tracking-tight">OmniCount</span>
+          <span className="hidden sm:inline text-xs text-slate-500 ml-1">— Professional Colony Enumeration Engine</span>
         </div>
         <div className="flex items-center gap-3">
           {imageSrc && (
@@ -255,10 +399,15 @@ export default function App() {
                 colonies={allColonies}
                 regions={allRegions}
                 mode={mode}
+                selectionKind={selectionKind}
+                gridParams={gridParams}
                 onToggleColony={handleToggleColony}
                 onAddManual={handleAddManual}
-                onAddRegion={handleAddRegion}
+                onAddSphere={handleAddSphere}
+                onAddLasso={handleAddLasso}
+                onAddGrid={handleAddGrid}
                 onDeleteRegion={handleDeleteRegion}
+                onMoveRegion={handleMoveRegion}
               />
             </div>
 
@@ -270,10 +419,15 @@ export default function App() {
                   onChange={setParams}
                   onRerun={handleRerun}
                   onClearAll={handleClearAll}
+                  onAutoGridFit={handleAutoGridFit}
                   trainingCount={totalSamples}
                   sessionCount={session.sessionCount}
                   mode={mode}
                   onModeChange={setMode}
+                  selectionKind={selectionKind}
+                  onSelectionKindChange={setSelectionKind}
+                  gridParams={gridParams}
+                  onGridParamsChange={setGridParams}
                   regionCount={entries.length}
                   colonyCount={activeColonies.length}
                 />
@@ -286,7 +440,6 @@ export default function App() {
             className="shrink-0 border-t border-slate-700 bg-slate-800/80"
             style={{ maxHeight: tableExpanded ? '45vh' : 'auto' }}
           >
-            {/* Collapse toggle */}
             <button
               onClick={() => setTableExpanded(x => !x)}
               className="w-full flex items-center justify-between px-5 py-2.5 hover:bg-slate-700/40 transition-colors"
@@ -308,6 +461,7 @@ export default function App() {
               <div className="px-5 pb-5 overflow-y-auto" style={{ maxHeight: 'calc(45vh - 42px)' }}>
                 <DilutionTable
                   entries={entries}
+                  plateImage={imgElRef.current}
                   onUpdateEntry={handleUpdateEntry}
                   onConfirmEntry={handleConfirmEntry}
                   onConfirmAll={handleConfirmAll}

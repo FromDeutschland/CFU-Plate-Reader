@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { CheckCircle2, Download, Trash2, AlertTriangle, CheckCheck, Clock } from 'lucide-react';
+import { CheckCircle2, Download, Trash2, AlertTriangle, CheckCheck, Clock, FileText, Lasso, CircleDot } from 'lucide-react';
 import type { RegionEntry, AnalysisResult, SopStatus } from '../types';
-import { buildResults, formatCFU, exportToCsv, SOP_MIN, SOP_MAX } from '../utils/cfuCalculations';
+import { buildResults, formatCFU, exportToCsv, exportToPdf, SOP_MIN, SOP_MAX } from '../utils/cfuCalculations';
 
 interface Props {
   entries: RegionEntry[];
+  plateImage: HTMLImageElement | null;
   onUpdateEntry: (regionId: string, patch: Partial<Pick<RegionEntry, 'dilutionFactor' | 'volumeMl'>>) => void;
   onConfirmEntry: (regionId: string) => void;
   onConfirmAll: () => void;
@@ -35,7 +36,7 @@ function SopBadge({ status, count }: { status: SopStatus; count: number }) {
   );
 }
 
-export function DilutionTable({ entries, onUpdateEntry, onConfirmEntry, onConfirmAll, onDeleteRegion, onUpdateLabel }: Props) {
+export function DilutionTable({ entries, plateImage, onUpdateEntry, onConfirmEntry, onConfirmAll, onDeleteRegion, onUpdateLabel }: Props) {
   const [editingLabel, setEditingLabel] = useState<string | null>(null);
   const [labelDraft, setLabelDraft] = useState('');
 
@@ -64,14 +65,14 @@ export function DilutionTable({ entries, onUpdateEntry, onConfirmEntry, onConfir
   return (
     <div className="space-y-3">
       {/* Table header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h3 className="text-sm font-semibold text-slate-300">
           Analysis Regions
           <span className="ml-2 text-xs font-normal text-slate-500">
             SOP range: {SOP_MIN}–{SOP_MAX} colonies
           </span>
         </h3>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <button
             onClick={onConfirmAll}
             disabled={allConfirmed}
@@ -86,11 +87,18 @@ export function DilutionTable({ entries, onUpdateEntry, onConfirmEntry, onConfir
               const confirmedResults = results.filter(r => confirmedEntries.some(e => e.region.id === r.regionId));
               exportToCsv(confirmedResults.length ? confirmedResults : results, entries);
             }}
-            disabled={entries.length === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 text-xs font-medium transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs font-medium transition-colors"
           >
             <Download className="w-3.5 h-3.5" />
             Export CSV
+          </button>
+          <button
+            onClick={() => exportToPdf(results, entries, plateImage)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-700/40 hover:bg-purple-700/60 text-purple-200 text-xs font-medium border border-purple-500/30 transition-colors"
+            title="Open printable PDF report with annotated plate image"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            Export PDF
           </button>
         </div>
       </div>
@@ -102,10 +110,12 @@ export function DilutionTable({ entries, onUpdateEntry, onConfirmEntry, onConfir
             <tr className="bg-slate-800/80 border-b border-slate-700/60">
               <th className="px-3 py-2.5 text-left text-xs font-semibold text-slate-400 uppercase tracking-wide">#</th>
               <th className="px-3 py-2.5 text-left text-xs font-semibold text-slate-400 uppercase tracking-wide">Region</th>
-              <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">Colonies</th>
-              <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">SOP Status</th>
-              <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">Dilution Factor</th>
-              <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">Volume (mL)</th>
+              <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">Type</th>
+              <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">Pixel Area</th>
+              <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">Raw Count</th>
+              <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">SOP</th>
+              <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">Dilution</th>
+              <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">Vol (mL)</th>
               <th className="px-3 py-2.5 text-right text-xs font-semibold text-slate-400 uppercase tracking-wide">CFU / mL</th>
               <th className="px-3 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wide">Actions</th>
             </tr>
@@ -115,6 +125,7 @@ export function DilutionTable({ entries, onUpdateEntry, onConfirmEntry, onConfir
               const result = results[idx];
               const colCount = entry.colonies.filter(c => c.status !== 'rejected').length;
               const autoCount = entry.colonies.filter(c => c.status === 'auto').length;
+              const KindIcon = entry.region.kind === 'lasso' ? Lasso : CircleDot;
 
               return (
                 <tr
@@ -125,12 +136,10 @@ export function DilutionTable({ entries, onUpdateEntry, onConfirmEntry, onConfir
                       : 'bg-slate-800/40 hover:bg-slate-800/70'
                   }`}
                 >
-                  {/* # */}
                   <td className="px-3 py-2.5">
                     <span className="text-slate-500 font-mono text-xs">{idx + 1}</span>
                   </td>
 
-                  {/* Region label */}
                   <td className="px-3 py-2.5">
                     {editingLabel === entry.region.id ? (
                       <input
@@ -153,6 +162,23 @@ export function DilutionTable({ entries, onUpdateEntry, onConfirmEntry, onConfir
                         {entry.region.label}
                       </button>
                     )}
+                  </td>
+
+                  {/* Selection kind */}
+                  <td className="px-3 py-2.5">
+                    <div className="flex justify-center">
+                      <span className="inline-flex items-center gap-1 text-xs text-slate-300 bg-slate-700/60 px-2 py-0.5 rounded" title={`${entry.region.kind} selection`}>
+                        <KindIcon className="w-3 h-3" />
+                        {entry.region.kind}
+                      </span>
+                    </div>
+                  </td>
+
+                  {/* Total pixel area */}
+                  <td className="px-3 py-2.5 text-center">
+                    <span className="font-mono text-xs text-slate-300">
+                      {result.totalPixelArea.toLocaleString()}
+                    </span>
                   </td>
 
                   {/* Colony count */}
@@ -179,7 +205,7 @@ export function DilutionTable({ entries, onUpdateEntry, onConfirmEntry, onConfir
                       disabled={entry.confirmed}
                       value={entry.dilutionFactor}
                       onChange={e => onUpdateEntry(entry.region.id, { dilutionFactor: Math.max(1, Number(e.target.value)) })}
-                      className="w-24 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm text-center text-white outline-none focus:border-blue-400 disabled:opacity-50 disabled:cursor-not-allowed mx-auto block"
+                      className="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm text-center text-white outline-none focus:border-blue-400 disabled:opacity-50 disabled:cursor-not-allowed mx-auto block"
                       title="e.g. 1000 for 1:1000 dilution"
                     />
                     <p className="text-xs text-slate-500 text-center mt-0.5">
