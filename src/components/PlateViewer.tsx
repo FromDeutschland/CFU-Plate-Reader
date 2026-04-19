@@ -26,6 +26,9 @@ interface Props {
   gridParams: GridParams;
   onToggleColony: (id: string) => void;
   onAddManual: (cx: number, cy: number) => void;
+  onDeleteColony?: (id: string) => void;
+  onMoveColony?: (id: string, cx: number, cy: number) => void;
+  onResizeColony?: (id: string, radius: number) => void;
   onAddSphere: (region: { cx: number; cy: number; radius: number }) => void;
   onAddLasso: (polygon: { x: number; y: number }[]) => void;
   onAddGrid: (rect: GridRect, params: GridParams) => void;
@@ -44,7 +47,7 @@ function colonyColor(confidence: number, status: string): { stroke: string; fill
   if (status === 'rejected') return { stroke: '#f87171', fill: 'rgba(248,113,113,0.08)' };
   if (status === 'confirmed') return { stroke: '#22c55e', fill: 'rgba(34,197,94,0.18)' };
   if (confidence >= 0.7) return { stroke: '#22c55e', fill: 'rgba(34,197,94,0.15)' };
-  if (confidence >= 0.4) return { stroke: '#f97316', fill: 'rgba(249,115,22,0.15)' };
+  if (confidence >= 0.4) return { stroke: '#3b82f6', fill: 'rgba(59,130,246,0.15)' };
   return { stroke: '#ef4444', fill: 'rgba(239,68,68,0.12)' };
 }
 
@@ -103,7 +106,8 @@ function isSampleTool(tool: SelectionTool): tool is 'sampleAgar' | 'sampleColony
 export function PlateViewer({
   src, imageWidth, imageHeight,
   colonies, regions, mode, selectionKind, gridParams,
-  onToggleColony, onAddManual, onAddSphere, onAddLasso, onAddGrid,
+  onToggleColony, onAddManual, onDeleteColony, onMoveColony, onResizeColony,
+  onAddSphere, onAddLasso, onAddGrid,
   onDeleteRegion, onMoveRegion, calibrationSamples, onCaptureSample,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -135,6 +139,13 @@ export function PlateViewer({
     originalCx: number; originalCy: number;
     cursorX: number; cursorY: number;
   } | null>(null);
+  const [editingColony, setEditingColony] = useState<{
+    colonyId: string;
+    startX: number; startY: number;
+    originCx: number; originCy: number;
+    cx: number; cy: number;
+  } | null>(null);
+  const [hoverColonyId, setHoverColonyId] = useState<string | null>(null);
 
   // Hover state — for cursor hint
   const [hoverMove, setHoverMove] = useState(false);
@@ -167,6 +178,16 @@ export function PlateViewer({
     };
   }
 
+  function colonyUnderPoint(x: number, y: number): Colony | null {
+    for (let i = colonies.length - 1; i >= 0; i--) {
+      const colony = colonies[i];
+      if (colony.status === 'rejected') continue;
+      const r = Math.max(colony.radius, 3) + CLICK_TOL / zoom;
+      if ((colony.cx - x) ** 2 + (colony.cy - y) ** 2 <= r * r) return colony;
+    }
+    return null;
+  }
+
   function redraw() {
     const canvas = canvasRef.current;
     const img    = imgRef.current;
@@ -184,6 +205,7 @@ export function PlateViewer({
     const moveId = carrying?.regionId;
     const mdx = carrying ? carrying.cursorX - carrying.originalCx : 0;
     const mdy = carrying ? carrying.cursorY - carrying.originalCy : 0;
+    const draggedColonyId = editingColony?.colonyId;
 
     // ── Draw saved regions ───────────────────────────────────────────────
     regions.forEach((reg, idx) => {
@@ -328,20 +350,23 @@ export function PlateViewer({
     for (const c of colonies) {
       if (c.status === 'rejected') continue;
       const { stroke, fill } = colonyColor(c.confidence, c.status);
+      const preview = c.id === draggedColonyId ? editingColony : null;
       const r = Math.max(c.radius, 3);
       const offset = c.regionId === moveId;
       const ox = offset ? mdx : 0;
       const oy = offset ? mdy : 0;
+      const drawCx = preview ? preview.cx : c.cx + ox;
+      const drawCy = preview ? preview.cy : c.cy + oy;
 
       ctx.beginPath();
-      ctx.arc(c.cx + ox, c.cy + oy, r + CLICK_TOL / zoom, 0, Math.PI * 2);
+      ctx.arc(drawCx, drawCy, r + CLICK_TOL / zoom, 0, Math.PI * 2);
       ctx.fillStyle = fill;
       ctx.fill();
 
       ctx.beginPath();
-      ctx.arc(c.cx + ox, c.cy + oy, r, 0, Math.PI * 2);
+      ctx.arc(drawCx, drawCy, r, 0, Math.PI * 2);
       ctx.strokeStyle = stroke;
-      ctx.lineWidth   = 1.5 / zoom;
+      ctx.lineWidth   = (hoverColonyId === c.id || draggedColonyId === c.id ? 2.5 : 1.5) / zoom;
       ctx.stroke();
     }
 
@@ -398,6 +423,16 @@ export function PlateViewer({
   // ── Zoom / radius-resize ───────────────────────────────────────────────
   function onWheel(e: WheelEvent<HTMLDivElement>) {
     e.preventDefault();
+
+    if (mode === 'add' && onResizeColony && (hoverColonyId || editingColony?.colonyId)) {
+      const targetId = editingColony?.colonyId ?? hoverColonyId;
+      const colony = targetId ? colonies.find(c => c.id === targetId) : null;
+      if (colony) {
+        const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+        onResizeColony(colony.id, colony.radius * factor);
+        return;
+      }
+    }
 
     // In Select mode with an in-progress sphere, wheel adjusts radius rather than zoom
     if (mode === 'select' && selectionKind === 'sphere' && drawing) {
@@ -475,6 +510,23 @@ export function PlateViewer({
       return;
     }
 
+    if (mode === 'add') {
+      const { x, y } = screenToImage(e.clientX, e.clientY);
+      const hit = colonyUnderPoint(x, y);
+      if (hit) {
+        setEditingColony({
+          colonyId: hit.id,
+          startX: x,
+          startY: y,
+          originCx: hit.cx,
+          originCy: hit.cy,
+          cx: hit.cx,
+          cy: hit.cy,
+        });
+        return;
+      }
+    }
+
     setIsPanning(true);
     panStart.current = { mx: e.clientX, my: e.clientY, px: pan.x, py: pan.y };
   }
@@ -482,6 +534,16 @@ export function PlateViewer({
   function onMouseMove(e: MouseEvent<HTMLDivElement>) {
     const { x: ix, y: iy } = screenToImage(e.clientX, e.clientY);
     cursor.current = { ix, iy };
+
+    if (editingColony) {
+      const nextCx = editingColony.originCx + (ix - editingColony.startX);
+      const nextCy = editingColony.originCy + (iy - editingColony.startY);
+      if (Math.abs(ix - editingColony.startX) + Math.abs(iy - editingColony.startY) > 2) {
+        didDrag.current = true;
+      }
+      setEditingColony({ ...editingColony, cx: nextCx, cy: nextCy });
+      return;
+    }
 
     if (carrying) {
       setCarrying({ ...carrying, cursorX: ix, cursorY: iy });
@@ -530,6 +592,13 @@ export function PlateViewer({
       setHoverMove(false);
     }
 
+    if (mode === 'add' && !isPanning) {
+      const hit = colonyUnderPoint(ix, iy);
+      setHoverColonyId(hit?.id ?? null);
+    } else if (hoverColonyId) {
+      setHoverColonyId(null);
+    }
+
     if (!isPanning) return;
     const dx = e.clientX - panStart.current.mx;
     const dy = e.clientY - panStart.current.my;
@@ -538,6 +607,16 @@ export function PlateViewer({
   }
 
   function onMouseUp(e: MouseEvent<HTMLDivElement>) {
+    if (editingColony) {
+      if (didDrag.current) {
+        onMoveColony?.(editingColony.colonyId, editingColony.cx, editingColony.cy);
+      } else {
+        onDeleteColony?.(editingColony.colonyId);
+      }
+      setEditingColony(null);
+      return;
+    }
+
     if (carrying) {
       if (justPickedUp.current) {
         justPickedUp.current = false;
@@ -587,12 +666,9 @@ export function PlateViewer({
 
     const { x: ix, y: iy } = screenToImage(e.clientX, e.clientY);
 
-    const hit = colonies.find(c => {
-      const r = Math.max(c.radius, 3) + CLICK_TOL / zoom;
-      return (c.cx - ix) ** 2 + (c.cy - iy) ** 2 <= r * r;
-    });
+    const hit = colonyUnderPoint(ix, iy);
 
-    if (hit) {
+    if (hit && mode === 'review') {
       onToggleColony(hit.id);
       return;
     }
@@ -617,6 +693,7 @@ export function PlateViewer({
 
   const cursorStyle = (() => {
     if (carrying) return 'grabbing';
+    if (editingColony) return 'grabbing';
     if (mode === 'select') {
       if (drawStart.current || lassoActive.current || gridStart.current) return 'crosshair';
       if (isSampleTool(selectionKind)) return 'crosshair';
@@ -625,7 +702,7 @@ export function PlateViewer({
       return 'cell';
     }
     if (isPanning) return 'grabbing';
-    if (mode === 'add') return 'crosshair';
+    if (mode === 'add') return hoverColonyId ? 'grab' : 'crosshair';
     return 'default';
   })();
 
@@ -650,7 +727,7 @@ export function PlateViewer({
         <div className="ml-auto flex items-center gap-3 flex-wrap">
           {[
             { color: '#ef4444', label: 'Low' },
-            { color: '#f97316', label: 'Medium' },
+            { color: '#3b82f6', label: 'Medium' },
             { color: '#22c55e', label: 'High / Confirmed' },
           ].map(({ color, label }) => (
             <span key={label} className="flex items-center gap-1 text-xs text-slate-400">
@@ -675,7 +752,7 @@ export function PlateViewer({
             : mode === 'select' && selectionKind === 'sampleColony'
             ? 'Click a representative colony to capture a color sample. Edge-click still deletes a region. Right-click or Escape cancels carrying.'
             : mode === 'add'
-            ? 'Click empty space to add a colony. Click an existing colony to cycle: auto → confirmed → rejected.'
+            ? 'Click empty space inside a region to add a colony. Click a colony to remove it, drag it to move it, and scroll over it to resize.'
             : 'Click a colony to cycle: auto → confirmed → rejected. Switch to Add mode to place manually.'}
           {' '}Scroll to zoom · Drag empty space to pan.
         </p>
@@ -700,6 +777,13 @@ export function PlateViewer({
         onMouseLeave={() => {
           setIsPanning(false);
 
+          if (editingColony) {
+            if (didDrag.current) {
+              onMoveColony?.(editingColony.colonyId, editingColony.cx, editingColony.cy);
+            }
+            setEditingColony(null);
+          }
+
           if (mode === 'select' && selectionKind === 'sphere'
               && drawStart.current && drawing && drawing.radius > 10 && didDrag.current) {
             onAddSphere({ cx: drawing.cx, cy: drawing.cy, radius: drawing.radius });
@@ -719,7 +803,9 @@ export function PlateViewer({
           setLassoPoints([]);
           gridStart.current = null;
           setGridRect(null);
+          setEditingColony(null);
           setHoverMove(false);
+          setHoverColonyId(null);
         }}
       >
         <canvas ref={canvasRef} className="absolute inset-0" />

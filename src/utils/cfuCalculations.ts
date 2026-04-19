@@ -168,7 +168,7 @@ export function exportToPdf(
         ctx.arc(c.cx * scale, c.cy * scale, Math.max(c.radius, 3) * scale, 0, Math.PI * 2);
         ctx.strokeStyle = c.status === 'confirmed' ? '#22c55e'
           : c.confidence >= 0.7 ? '#22c55e'
-          : c.confidence >= 0.4 ? '#f97316'
+          : c.confidence >= 0.4 ? '#3b82f6'
           : '#ef4444';
         ctx.lineWidth = 1.2;
         ctx.stroke();

@@ -299,7 +299,7 @@ export function ControlPanel({
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-cyan-200">Color Calibration</p>
                 <p className="text-[11px] text-cyan-100/70">
-                  Sample agar and a representative colony, then apply the derived threshold.
+                  Sample agar and a representative colony to build a projected grayscale buffer.
                 </p>
               </div>
               {calibration && (
@@ -316,7 +316,7 @@ export function ControlPanel({
 
             {pendingCalibration && (
               <div className="rounded-lg border border-cyan-500/30 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-300">
-                Threshold {pendingCalibration.threshold} ·
+                Projected threshold {pendingCalibration.threshold} ·
                 {' '}
                 {pendingCalibration.invertImage ? 'Colonies are darker than agar' : 'Colonies are brighter than agar'}
               </div>
@@ -327,7 +327,7 @@ export function ControlPanel({
               disabled={!pendingCalibration}
               className="w-full rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Apply calibration & re-detect
+              Calibrate & Re-detect
             </button>
           </div>
         </div>

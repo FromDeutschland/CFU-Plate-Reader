@@ -33,11 +33,12 @@ function projectCalibrationIntensity(
   const axisR = calibration.colonySample.meanR - agarR;
   const axisG = calibration.colonySample.meanG - agarG;
   const axisB = calibration.colonySample.meanB - agarB;
-  const axisLen2 = axisR * axisR + axisG * axisG + axisB * axisB;
-  if (axisLen2 < 1) return null;
+  const axisLength = Math.hypot(axisR, axisG, axisB);
+  if (axisLength < 1) return null;
 
-  const agarBrightness = calibration.agarSample.meanBrightness;
-  const deltaBrightness = calibration.colonySample.meanBrightness - agarBrightness;
+  const unitR = axisR / axisLength;
+  const unitG = axisG / axisLength;
+  const unitB = axisB / axisLength;
   const projected = new Uint8Array(len);
 
   for (let i = 0; i < len; i++) {
@@ -49,8 +50,11 @@ function projectCalibrationIntensity(
     const relR = data[o] - agarR;
     const relG = data[o + 1] - agarG;
     const relB = data[o + 2] - agarB;
-    const t = (relR * axisR + relG * axisG + relB * axisB) / axisLen2;
-    projected[i] = clamp8(agarBrightness + t * deltaBrightness);
+    const scalar = relR * unitR + relG * unitG + relB * unitB;
+    const mapped = (scalar / axisLength) * 255;
+    projected[i] = calibration.invertImage
+      ? clamp8(255 - mapped)
+      : clamp8(mapped);
   }
 
   return projected;

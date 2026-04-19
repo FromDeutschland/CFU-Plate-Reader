@@ -22,12 +22,32 @@ import { ControlPanel } from './components/ControlPanel';
 import { DilutionTable } from './components/DilutionTable';
 
 let regionCounter = 0;
-const SAMPLE_RADIUS = 20;
+const SAMPLE_RADIUS = 10;
 
 type SampleToolKind = 'sampleAgar' | 'sampleColony';
 
 function makeRegionLabel(idx: number): string {
   return `Region ${idx + 1}`;
+}
+
+function pointInPolygon(x: number, y: number, poly: { x: number; y: number }[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    const intersect = (yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function pointInRegion(x: number, y: number, region: SelectionRegion): boolean {
+  if (region.kind === 'lasso' && region.polygon && region.polygon.length > 2) {
+    return pointInPolygon(x, y, region.polygon);
+  }
+  const dx = x - region.cx;
+  const dy = y - region.cy;
+  return dx * dx + dy * dy <= region.radius * region.radius;
 }
 
 function brightnessOf(r: number, g: number, b: number): number {
@@ -118,7 +138,7 @@ function deriveCalibration(agarSample: ColorSample, colonySample: ColorSample): 
   return {
     agarSample,
     colonySample,
-    threshold: Math.round((agarSample.meanBrightness + colonySample.meanBrightness) / 2),
+    threshold: 128,
     invertImage: colonySample.meanBrightness < agarSample.meanBrightness,
   };
 }
@@ -349,7 +369,7 @@ export default function App() {
     }));
   }, []);
 
-  // ── Toggle colony status + record training data ────────────────────────
+  // ── Review-mode toggle for detected colonies ───────────────────────────
   const handleToggleColony = useCallback((colonyId: string) => {
     setEntries(prev => prev.map(entry => {
       const col = entry.colonies.find(c => c.id === colonyId);
@@ -380,11 +400,10 @@ export default function App() {
     setEntries(prev => {
       if (prev.length === 0) return prev;
       const ownerIdx = prev.findIndex(e => {
-        const dx = cx - e.region.cx;
-        const dy = cy - e.region.cy;
-        return dx * dx + dy * dy <= e.region.radius * e.region.radius;
+        return pointInRegion(cx, cy, e.region);
       });
-      const idx = ownerIdx >= 0 ? ownerIdx : 0;
+      if (ownerIdx < 0) return prev;
+      const idx = ownerIdx;
       const regionId = prev[idx].region.id;
 
       const newColony: Colony = {
@@ -407,6 +426,43 @@ export default function App() {
       );
     });
   }, [recordAccepted]);
+
+  const handleDeleteColony = useCallback((colonyId: string) => {
+    setEntries(prev => prev.map(entry => {
+      if (!entry.colonies.some(c => c.id === colonyId)) return entry;
+      return {
+        ...entry,
+        colonies: entry.colonies.filter(c => c.id !== colonyId),
+      };
+    }));
+  }, []);
+
+  const handleMoveColony = useCallback((colonyId: string, cx: number, cy: number) => {
+    setEntries(prev => prev.map(entry => {
+      const colony = entry.colonies.find(c => c.id === colonyId);
+      if (!colony) return entry;
+      return {
+        ...entry,
+        colonies: entry.colonies.map(c => c.id === colonyId ? { ...c, cx, cy } : c),
+      };
+    }));
+  }, []);
+
+  const handleResizeColony = useCallback((colonyId: string, radius: number) => {
+    setEntries(prev => prev.map(entry => {
+      const colony = entry.colonies.find(c => c.id === colonyId);
+      if (!colony) return entry;
+      const nextRadius = Math.max(3, Math.min(80, radius));
+      return {
+        ...entry,
+        colonies: entry.colonies.map(c => c.id === colonyId ? {
+          ...c,
+          radius: nextRadius,
+          area: Math.PI * nextRadius * nextRadius,
+        } : c),
+      };
+    }));
+  }, []);
 
   // ── Re-run detection on all regions ───────────────────────────────────
   const rerunWithParams = useCallback((baseParams: DetectionParams) => {
@@ -561,6 +617,9 @@ export default function App() {
                 gridParams={gridParams}
                 onToggleColony={handleToggleColony}
                 onAddManual={handleAddManual}
+                onDeleteColony={handleDeleteColony}
+                onMoveColony={handleMoveColony}
+                onResizeColony={handleResizeColony}
                 onAddSphere={handleAddSphere}
                 onAddLasso={handleAddLasso}
                 onAddGrid={handleAddGrid}
