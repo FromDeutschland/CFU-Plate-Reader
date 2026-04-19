@@ -39,6 +39,7 @@ export interface DetectionParams {
   chromaNormalize: boolean;
   /** Minimum edge sharpness to accept (0–1), used when textureCheck enabled */
   minEdgeSharpness: number;
+  calibration?: Calibration;
 }
 
 export const DEFAULT_PARAMS: DetectionParams = {
@@ -59,7 +60,26 @@ export type SelectionKind = 'sphere' | 'lasso';
 /** Drawing tool available in Select mode. 'grid' drops a row×col matrix of
  *  sphere regions via a single drag; the regions themselves are always
  *  sphere-kind, so SelectionKind (the region type) stays narrow. */
-export type SelectionTool = SelectionKind | 'grid';
+export type SelectionTool = SelectionKind | 'grid' | 'sampleAgar' | 'sampleColony';
+
+export interface ColorSample {
+  cx: number;
+  cy: number;
+  radius: number;
+  meanR: number;
+  meanG: number;
+  meanB: number;
+  meanBrightness: number;
+  stdBrightness: number;
+  pixelCount: number;
+}
+
+export interface Calibration {
+  agarSample: ColorSample;
+  colonySample: ColorSample;
+  threshold: number;
+  invertImage: boolean;
+}
 
 export interface GridParams {
   rows: number;           // 1–10

@@ -3,7 +3,13 @@ import {
   RefreshCw, Zap, Brain, CircleDot, MousePointer, Plus, Lasso,
   Grid3x3, Sparkles, Sun, ChevronDown, ChevronRight,
 } from 'lucide-react';
-import type { DetectionParams, SelectionTool, GridParams } from '../types';
+import type {
+  Calibration,
+  ColorSample,
+  DetectionParams,
+  GridParams,
+  SelectionTool,
+} from '../types';
 import type { ViewerMode } from './PlateViewer';
 
 interface Props {
@@ -22,6 +28,11 @@ interface Props {
   onGridParamsChange: (g: GridParams) => void;
   regionCount: number;
   colonyCount: number;
+  agarSample: ColorSample | null;
+  colonySample: ColorSample | null;
+  calibration?: Calibration;
+  pendingCalibration: Calibration | null;
+  onApplyCalibration: () => void;
 }
 
 function Slider({
@@ -114,6 +125,8 @@ const SELECTION_TOOLS: { id: SelectionTool; icon: typeof CircleDot; label: strin
   { id: 'sphere', icon: CircleDot, label: 'Sphere' },
   { id: 'lasso',  icon: Lasso,     label: 'Lasso'  },
   { id: 'grid',   icon: Grid3x3,   label: 'Grid'   },
+  { id: 'sampleAgar', icon: Sun, label: 'Agar' },
+  { id: 'sampleColony', icon: Sparkles, label: 'Colony' },
 ];
 
 export function ControlPanel({
@@ -123,12 +136,30 @@ export function ControlPanel({
   selectionKind, onSelectionKindChange,
   gridParams, onGridParamsChange,
   regionCount, colonyCount,
+  agarSample, colonySample,
+  calibration, pendingCalibration, onApplyCalibration,
 }: Props) {
   function set<K extends keyof DetectionParams>(key: K, val: DetectionParams[K]) {
     onChange({ ...params, [key]: val });
   }
   function setGrid<K extends keyof GridParams>(key: K, val: GridParams[K]) {
     onGridParamsChange({ ...gridParams, [key]: val });
+  }
+  function renderSampleCard(label: string, sample: ColorSample | null, accent: string) {
+    return (
+      <div className={`rounded-lg border px-3 py-2 ${sample ? accent : 'border-slate-700 bg-slate-900/40'}`}>
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-300">{label}</div>
+        {sample ? (
+          <div className="mt-1 space-y-0.5 text-[11px] text-slate-300">
+            <div>Brightness {sample.meanBrightness.toFixed(1)}</div>
+            <div>Std dev {sample.stdBrightness.toFixed(1)}</div>
+            <div>{sample.pixelCount} px sampled</div>
+          </div>
+        ) : (
+          <div className="mt-1 text-[11px] text-slate-500">Click with the matching sample tool</div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -174,12 +205,12 @@ export function ControlPanel({
       {mode === 'select' && (
         <div>
           <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Selection Shape</p>
-          <div className="flex gap-1 p-1 bg-slate-800/60 rounded-lg">
+          <div className="grid grid-cols-2 gap-1 p-1 bg-slate-800/60 rounded-lg">
             {SELECTION_TOOLS.map(({ id, icon: Icon, label }) => (
               <button
                 key={id}
                 onClick={() => onSelectionKindChange(id)}
-                className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                className={`flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-medium transition-colors ${
                   selectionKind === id
                     ? 'bg-blue-600 text-white shadow'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'
@@ -262,6 +293,43 @@ export function ControlPanel({
             <Grid3x3 className="w-3.5 h-3.5" />
             Auto-detect dilution spots
           </button>
+
+          <div className="mt-3 space-y-3 rounded-lg border border-cyan-700/30 bg-cyan-950/20 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-cyan-200">Color Calibration</p>
+                <p className="text-[11px] text-cyan-100/70">
+                  Sample agar and a representative colony, then apply the derived threshold.
+                </p>
+              </div>
+              {calibration && (
+                <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
+                  Active
+                </span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              {renderSampleCard('Agar', agarSample, 'border-amber-500/40 bg-amber-500/10')}
+              {renderSampleCard('Colony', colonySample, 'border-fuchsia-500/40 bg-fuchsia-500/10')}
+            </div>
+
+            {pendingCalibration && (
+              <div className="rounded-lg border border-cyan-500/30 bg-slate-950/40 px-3 py-2 text-[11px] text-slate-300">
+                Threshold {pendingCalibration.threshold} ·
+                {' '}
+                {pendingCalibration.invertImage ? 'Colonies are darker than agar' : 'Colonies are brighter than agar'}
+              </div>
+            )}
+
+            <button
+              onClick={onApplyCalibration}
+              disabled={!pendingCalibration}
+              className="w-full rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Apply calibration & re-detect
+            </button>
+          </div>
         </div>
       )}
 

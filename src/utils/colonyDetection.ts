@@ -1,4 +1,10 @@
-import type { Colony, DetectionParams, ColonyFeatures, SelectionRegion } from '../types';
+import type {
+  Calibration,
+  Colony,
+  DetectionParams,
+  ColonyFeatures,
+  SelectionRegion,
+} from '../types';
 
 // ── Grayscale ──────────────────────────────────────────────────────────────
 
@@ -9,6 +15,45 @@ function toGrayscale(data: Uint8ClampedArray, len: number): Uint8Array {
     gray[i] = (0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2]) | 0;
   }
   return gray;
+}
+
+function clamp8(value: number): number {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function projectCalibrationIntensity(
+  data: Uint8ClampedArray,
+  len: number,
+  mask: Uint8Array | null,
+  calibration: Calibration
+): Uint8Array | null {
+  const agarR = calibration.agarSample.meanR;
+  const agarG = calibration.agarSample.meanG;
+  const agarB = calibration.agarSample.meanB;
+  const axisR = calibration.colonySample.meanR - agarR;
+  const axisG = calibration.colonySample.meanG - agarG;
+  const axisB = calibration.colonySample.meanB - agarB;
+  const axisLen2 = axisR * axisR + axisG * axisG + axisB * axisB;
+  if (axisLen2 < 1) return null;
+
+  const agarBrightness = calibration.agarSample.meanBrightness;
+  const deltaBrightness = calibration.colonySample.meanBrightness - agarBrightness;
+  const projected = new Uint8Array(len);
+
+  for (let i = 0; i < len; i++) {
+    if (mask && !mask[i]) {
+      projected[i] = 0;
+      continue;
+    }
+    const o = i * 4;
+    const relR = data[o] - agarR;
+    const relG = data[o + 1] - agarG;
+    const relB = data[o + 2] - agarB;
+    const t = (relR * axisR + relG * axisG + relB * axisB) / axisLen2;
+    projected[i] = clamp8(agarBrightness + t * deltaBrightness);
+  }
+
+  return projected;
 }
 
 // ── Chroma normalisation (neutralise agar shading / colour cast) ──────────
@@ -425,10 +470,13 @@ export function detectColonies(
   const len = w * h;
 
   const mask = buildMaskFromImageData(data, w, h);
-
-  if (params.chromaNormalize) chromaNormalize(data, w, h, mask);
-
-  let gray = toGrayscale(data, len);
+  let gray = params.calibration
+    ? projectCalibrationIntensity(data, len, mask, params.calibration)
+    : null;
+  if (!gray) {
+    if (params.chromaNormalize) chromaNormalize(data, w, h, mask);
+    gray = toGrayscale(data, len);
+  }
   if (params.invertImage) {
     for (let i = 0; i < len; i++) gray[i] = 255 - gray[i];
   }

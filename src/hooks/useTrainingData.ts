@@ -66,10 +66,18 @@ export function useTrainingData() {
   }, []);
 
   const getLearnedParams = useCallback(
-    (base: DetectionParams): DetectionParams => ({
-      ...base,
-      ...session.learnedParams,
-    }),
+    (base: DetectionParams): DetectionParams => {
+      const merged: DetectionParams = {
+        ...base,
+        ...session.learnedParams,
+      };
+      if (base.calibration) {
+        merged.calibration = base.calibration;
+        merged.threshold = base.threshold;
+        merged.invertImage = base.invertImage;
+      }
+      return merged;
+    },
     [session.learnedParams]
   );
 

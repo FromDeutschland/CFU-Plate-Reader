@@ -1,7 +1,16 @@
 import { useState, useRef, useCallback } from 'react';
 import { Microscope, Upload, ChevronDown, ChevronUp, RotateCcw } from 'lucide-react';
 
-import type { Colony, RegionEntry, SelectionRegion, SelectionTool, DetectionParams, GridParams } from './types';
+import type {
+  Calibration,
+  Colony,
+  ColorSample,
+  DetectionParams,
+  GridParams,
+  RegionEntry,
+  SelectionRegion,
+  SelectionTool,
+} from './types';
 import { DEFAULT_PARAMS, DEFAULT_GRID } from './types';
 import { loadImageFile, loadImageElement } from './utils/imageLoader';
 import { detectColoniesInRegion, detectDilutionSpots } from './utils/colonyDetection';
@@ -13,9 +22,105 @@ import { ControlPanel } from './components/ControlPanel';
 import { DilutionTable } from './components/DilutionTable';
 
 let regionCounter = 0;
+const SAMPLE_RADIUS = 20;
+
+type SampleToolKind = 'sampleAgar' | 'sampleColony';
 
 function makeRegionLabel(idx: number): string {
   return `Region ${idx + 1}`;
+}
+
+function brightnessOf(r: number, g: number, b: number): number {
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+function captureColorSample(
+  img: HTMLImageElement,
+  cx: number,
+  cy: number,
+  radius: number
+): ColorSample {
+  const r = Math.ceil(radius);
+  const x0 = Math.max(0, Math.floor(cx - r));
+  const y0 = Math.max(0, Math.floor(cy - r));
+  const x1 = Math.min(img.naturalWidth, Math.ceil(cx + r));
+  const y1 = Math.min(img.naturalHeight, Math.ceil(cy + r));
+  const w = x1 - x0;
+  const h = y1 - y0;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(img, x0, y0, w, h, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+
+  const localCx = cx - x0;
+  const localCy = cy - y0;
+  const radiusSq = radius * radius;
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
+  let sumBrightness = 0;
+  let sumBrightnessSq = 0;
+  let pixelCount = 0;
+
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const dx = px + 0.5 - localCx;
+      const dy = py + 0.5 - localCy;
+      if (dx * dx + dy * dy > radiusSq) continue;
+      const idx = (py * w + px) * 4;
+      const red = data[idx];
+      const green = data[idx + 1];
+      const blue = data[idx + 2];
+      const brightness = brightnessOf(red, green, blue);
+      sumR += red;
+      sumG += green;
+      sumB += blue;
+      sumBrightness += brightness;
+      sumBrightnessSq += brightness * brightness;
+      pixelCount++;
+    }
+  }
+
+  if (pixelCount === 0) {
+    return {
+      cx,
+      cy,
+      radius,
+      meanR: 0,
+      meanG: 0,
+      meanB: 0,
+      meanBrightness: 0,
+      stdBrightness: 0,
+      pixelCount: 0,
+    };
+  }
+
+  const meanBrightness = sumBrightness / pixelCount;
+  const variance = Math.max(0, sumBrightnessSq / pixelCount - meanBrightness * meanBrightness);
+
+  return {
+    cx,
+    cy,
+    radius,
+    meanR: sumR / pixelCount,
+    meanG: sumG / pixelCount,
+    meanB: sumB / pixelCount,
+    meanBrightness,
+    stdBrightness: Math.sqrt(variance),
+    pixelCount,
+  };
+}
+
+function deriveCalibration(agarSample: ColorSample, colonySample: ColorSample): Calibration {
+  return {
+    agarSample,
+    colonySample,
+    threshold: Math.round((agarSample.meanBrightness + colonySample.meanBrightness) / 2),
+    invertImage: colonySample.meanBrightness < agarSample.meanBrightness,
+  };
 }
 
 export default function App() {
@@ -36,9 +141,14 @@ export default function App() {
   const [selectionKind, setSelectionKind] = useState<SelectionTool>('sphere');
   const [gridParams, setGridParams]       = useState<GridParams>(DEFAULT_GRID);
   const [tableExpanded, setTableExpanded] = useState(true);
+  const [agarSample, setAgarSample]       = useState<ColorSample | null>(null);
+  const [colonySample, setColonySample]   = useState<ColorSample | null>(null);
 
   // ── Training ───────────────────────────────────────────────────────────
   const { session, recordAccepted, recordRejected, getLearnedParams, resetTraining, totalSamples } = useTrainingData();
+  const pendingCalibration = agarSample && colonySample
+    ? deriveCalibration(agarSample, colonySample)
+    : null;
 
   // ── Load image ─────────────────────────────────────────────────────────
   const handleFileLoaded = useCallback(async (file: File) => {
@@ -51,6 +161,17 @@ export default function App() {
       setImageSize({ w: el.naturalWidth, h: el.naturalHeight });
       setEntries([]);
       setMode('select');
+      setSelectionKind('sphere');
+      setAgarSample(null);
+      setColonySample(null);
+      setParams(prev => prev.calibration
+        ? {
+            ...prev,
+            threshold: DEFAULT_PARAMS.threshold,
+            invertImage: DEFAULT_PARAMS.invertImage,
+            calibration: undefined,
+          }
+        : prev);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to load image');
     } finally {
@@ -288,16 +409,42 @@ export default function App() {
   }, [recordAccepted]);
 
   // ── Re-run detection on all regions ───────────────────────────────────
-  const handleRerun = useCallback(() => {
+  const rerunWithParams = useCallback((baseParams: DetectionParams) => {
     if (!imgElRef.current) return;
     const el = imgElRef.current;
-    const effectiveParams = getLearnedParams(params);
+    const effectiveParams = getLearnedParams(baseParams);
     setEntries(prev => prev.map(entry => ({
       ...entry,
       confirmed: false,
       colonies:  detectColoniesInRegion(el, entry.region, effectiveParams),
     })));
-  }, [params, getLearnedParams]);
+  }, [getLearnedParams]);
+
+  const handleRerun = useCallback(() => {
+    rerunWithParams(params);
+  }, [params, rerunWithParams]);
+
+  const handleCaptureSample = useCallback((kind: SampleToolKind, cx: number, cy: number) => {
+    if (!imgElRef.current) return;
+    const sample = captureColorSample(imgElRef.current, cx, cy, SAMPLE_RADIUS);
+    if (kind === 'sampleAgar') {
+      setAgarSample(sample);
+      return;
+    }
+    setColonySample(sample);
+  }, []);
+
+  const handleApplyCalibration = useCallback(() => {
+    if (!pendingCalibration) return;
+    const nextParams: DetectionParams = {
+      ...params,
+      threshold: pendingCalibration.threshold,
+      invertImage: pendingCalibration.invertImage,
+      calibration: pendingCalibration,
+    };
+    setParams(nextParams);
+    rerunWithParams(nextParams);
+  }, [params, pendingCalibration, rerunWithParams]);
 
   // ── Clear all colonies (keep regions) ─────────────────────────────────
   const handleClearAll = useCallback(() => {
@@ -356,6 +503,17 @@ export default function App() {
                 setImageSrc(null);
                 setEntries([]);
                 imgElRef.current = null;
+                setAgarSample(null);
+                setColonySample(null);
+                setSelectionKind('sphere');
+                setParams(prev => prev.calibration
+                  ? {
+                      ...prev,
+                      threshold: DEFAULT_PARAMS.threshold,
+                      invertImage: DEFAULT_PARAMS.invertImage,
+                      calibration: undefined,
+                    }
+                  : prev);
               }}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm transition-colors"
             >
@@ -408,6 +566,8 @@ export default function App() {
                 onAddGrid={handleAddGrid}
                 onDeleteRegion={handleDeleteRegion}
                 onMoveRegion={handleMoveRegion}
+                calibrationSamples={{ agar: agarSample, colony: colonySample }}
+                onCaptureSample={handleCaptureSample}
               />
             </div>
 
@@ -430,6 +590,11 @@ export default function App() {
                   onGridParamsChange={setGridParams}
                   regionCount={entries.length}
                   colonyCount={activeColonies.length}
+                  agarSample={agarSample}
+                  colonySample={colonySample}
+                  calibration={params.calibration}
+                  pendingCalibration={pendingCalibration}
+                  onApplyCalibration={handleApplyCalibration}
                 />
               </div>
             </aside>

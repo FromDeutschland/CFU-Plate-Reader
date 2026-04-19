@@ -2,7 +2,13 @@ import {
   useRef, useState, useEffect, useCallback,
   type WheelEvent, type MouseEvent,
 } from 'react';
-import type { Colony, SelectionRegion, SelectionTool, GridParams } from '../types';
+import type {
+  Colony,
+  ColorSample,
+  GridParams,
+  SelectionRegion,
+  SelectionTool,
+} from '../types';
 import { ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
 
 export type ViewerMode = 'select' | 'review' | 'add';
@@ -25,6 +31,11 @@ interface Props {
   onAddGrid: (rect: GridRect, params: GridParams) => void;
   onDeleteRegion?: (id: string) => void;
   onMoveRegion?: (regionId: string, dx: number, dy: number) => void;
+  calibrationSamples?: {
+    agar: ColorSample | null;
+    colony: ColorSample | null;
+  };
+  onCaptureSample?: (kind: 'sampleAgar' | 'sampleColony', cx: number, cy: number) => void;
 }
 
 const CLICK_TOL = 8;
@@ -85,11 +96,15 @@ function pointNearRegionEdge(x: number, y: number, reg: SelectionRegion, tol: nu
   return false;
 }
 
+function isSampleTool(tool: SelectionTool): tool is 'sampleAgar' | 'sampleColony' {
+  return tool === 'sampleAgar' || tool === 'sampleColony';
+}
+
 export function PlateViewer({
   src, imageWidth, imageHeight,
   colonies, regions, mode, selectionKind, gridParams,
   onToggleColony, onAddManual, onAddSphere, onAddLasso, onAddGrid,
-  onDeleteRegion, onMoveRegion,
+  onDeleteRegion, onMoveRegion, calibrationSamples, onCaptureSample,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef    = useRef<HTMLCanvasElement>(null);
@@ -100,6 +115,7 @@ export function PlateViewer({
   const [isPanning, setIsPanning] = useState(false);
   const panStart = useRef({ mx: 0, my: 0, px: 0, py: 0 });
   const didDrag  = useRef(false);
+  const justPickedUp = useRef(false);
 
   // Sphere drawing state
   const [drawing, setDrawing] = useState<{ cx: number; cy: number; radius: number } | null>(null);
@@ -113,11 +129,11 @@ export function PlateViewer({
   const [gridRect, setGridRect] = useState<GridRect | null>(null);
   const gridStart = useRef<{ x: number; y: number } | null>(null);
 
-  // Region move state (click-and-drag inside an existing region)
-  const [moving, setMoving] = useState<{
+  // Region carry state (pick up on click, follow cursor until next click)
+  const [carrying, setCarrying] = useState<{
     regionId: string;
-    startX: number; startY: number;
-    dx: number; dy: number;
+    originalCx: number; originalCy: number;
+    cursorX: number; cursorY: number;
   } | null>(null);
 
   // Hover state — for cursor hint
@@ -164,10 +180,10 @@ export function PlateViewer({
 
     ctx.drawImage(img, 0, 0);
 
-    // Active move offset (only applies to the region being dragged)
-    const moveId = moving?.regionId;
-    const mdx = moving?.dx ?? 0;
-    const mdy = moving?.dy ?? 0;
+    // Active carry offset (only applies to the region being repositioned)
+    const moveId = carrying?.regionId;
+    const mdx = carrying ? carrying.cursorX - carrying.originalCx : 0;
+    const mdy = carrying ? carrying.cursorY - carrying.originalCy : 0;
 
     // ── Draw saved regions ───────────────────────────────────────────────
     regions.forEach((reg, idx) => {
@@ -215,6 +231,29 @@ export function PlateViewer({
       ctx.fillText(reg.label, reg.cx + ox, labelY);
       ctx.restore();
     });
+
+    const samples = [
+      { sample: calibrationSamples?.agar, color: '#f59e0b', label: 'Agar' },
+      { sample: calibrationSamples?.colony, color: '#d946ef', label: 'Colony' },
+    ];
+    for (const item of samples) {
+      if (!item.sample) continue;
+      ctx.save();
+      ctx.setLineDash([5 / zoom, 3 / zoom]);
+      ctx.strokeStyle = item.color;
+      ctx.lineWidth = 2 / zoom;
+      ctx.fillStyle = `${item.color}22`;
+      ctx.beginPath();
+      ctx.arc(item.sample.cx, item.sample.cy, item.sample.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = `${Math.max(11, 13 / zoom)}px ui-sans-serif, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = item.color;
+      ctx.fillText(item.label, item.sample.cx, item.sample.cy - item.sample.radius - 6 / zoom);
+      ctx.restore();
+    }
 
     // ── Draw in-progress sphere ─────────────────────────────────────────
     if (drawing && mode === 'select' && selectionKind === 'sphere') {
@@ -343,6 +382,19 @@ export function PlateViewer({
     return () => ro.disconnect();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (!carrying) return undefined;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        justPickedUp.current = false;
+        setCarrying(null);
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [carrying]);
+
   // ── Zoom / radius-resize ───────────────────────────────────────────────
   function onWheel(e: WheelEvent<HTMLDivElement>) {
     e.preventDefault();
@@ -379,17 +431,34 @@ export function PlateViewer({
 
   // ── Mouse interaction ─────────────────────────────────────────────────
   function onMouseDown(e: MouseEvent<HTMLDivElement>) {
+    if (e.button === 2) {
+      if (carrying) {
+        e.preventDefault();
+        justPickedUp.current = false;
+        setCarrying(null);
+      }
+      return;
+    }
     if (e.button !== 0) return;
     didDrag.current = false;
 
     if (mode === 'select') {
+      if (carrying) return;
       const { x, y } = screenToImage(e.clientX, e.clientY);
       const tol = 12 / zoom;
+      const sampleToolActive = isSampleTool(selectionKind);
 
-      // If click is inside an existing region (not on its edge) → start moving it
-      const hitRegion = regionUnderPoint(x, y, tol);
+      // Click inside an existing region (not on its edge) to pick it up.
+      const hitRegion = !sampleToolActive ? regionUnderPoint(x, y, tol) : null;
       if (hitRegion && onMoveRegion) {
-        setMoving({ regionId: hitRegion.id, startX: x, startY: y, dx: 0, dy: 0 });
+        justPickedUp.current = true;
+        setCarrying({
+          regionId: hitRegion.id,
+          originalCx: hitRegion.cx,
+          originalCy: hitRegion.cy,
+          cursorX: x,
+          cursorY: y,
+        });
         return;
       }
 
@@ -414,12 +483,8 @@ export function PlateViewer({
     const { x: ix, y: iy } = screenToImage(e.clientX, e.clientY);
     cursor.current = { ix, iy };
 
-    // Drag-to-move an existing region
-    if (moving) {
-      const dx = ix - moving.startX;
-      const dy = iy - moving.startY;
-      if (Math.abs(dx) + Math.abs(dy) > 2) didDrag.current = true;
-      setMoving({ ...moving, dx, dy });
+    if (carrying) {
+      setCarrying({ ...carrying, cursorX: ix, cursorY: iy });
       return;
     }
 
@@ -450,7 +515,14 @@ export function PlateViewer({
     }
 
     // Cursor hint: is hover inside a movable region?
-    if (mode === 'select' && !isPanning && !drawStart.current && !lassoActive.current && !gridStart.current) {
+    if (
+      mode === 'select'
+      && !isSampleTool(selectionKind)
+      && !isPanning
+      && !drawStart.current
+      && !lassoActive.current
+      && !gridStart.current
+    ) {
       const tol = 12 / zoom;
       const hit = regionUnderPoint(ix, iy, tol);
       setHoverMove(!!hit);
@@ -466,12 +538,18 @@ export function PlateViewer({
   }
 
   function onMouseUp(e: MouseEvent<HTMLDivElement>) {
-    // Commit region move
-    if (moving) {
-      if (didDrag.current && onMoveRegion && (Math.abs(moving.dx) > 1 || Math.abs(moving.dy) > 1)) {
-        onMoveRegion(moving.regionId, moving.dx, moving.dy);
+    if (carrying) {
+      if (justPickedUp.current) {
+        justPickedUp.current = false;
+        return;
       }
-      setMoving(null);
+      const { x, y } = screenToImage(e.clientX, e.clientY);
+      const dx = x - carrying.originalCx;
+      const dy = y - carrying.originalCy;
+      if (onMoveRegion && (Math.abs(dx) > 1 || Math.abs(dy) > 1)) {
+        onMoveRegion(carrying.regionId, dx, dy);
+      }
+      setCarrying(null);
       return;
     }
 
@@ -527,15 +605,21 @@ export function PlateViewer({
       }
     }
 
+    if (mode === 'select' && isSampleTool(selectionKind) && onCaptureSample) {
+      onCaptureSample(selectionKind, ix, iy);
+      return;
+    }
+
     if (mode === 'add') {
       onAddManual(ix, iy);
     }
   }
 
   const cursorStyle = (() => {
-    if (moving) return 'grabbing';
+    if (carrying) return 'grabbing';
     if (mode === 'select') {
       if (drawStart.current || lassoActive.current || gridStart.current) return 'crosshair';
+      if (isSampleTool(selectionKind)) return 'crosshair';
       if (hoverMove) return 'grab';
       if (selectionKind === 'grid') return 'crosshair';
       return 'cell';
@@ -581,11 +665,15 @@ export function PlateViewer({
       <div className="px-3 py-1.5 bg-slate-900/60 border-b border-slate-800 shrink-0">
         <p className="text-xs text-slate-500">
           {mode === 'select' && selectionKind === 'sphere'
-            ? 'Drag to draw · Scroll while drawing to resize · Drag inside a region to move · Click its edge to delete.'
+            ? 'Drag to draw · Scroll while drawing to resize · Click inside a region to pick it up · Click again to drop · Edge-click deletes.'
             : mode === 'select' && selectionKind === 'lasso'
-            ? 'Drag to freehand-draw · Drag inside a region to move · Click edge to delete.'
+            ? 'Drag to freehand-draw · Click inside a region to pick it up · Click again to drop · Edge-click deletes.'
             : mode === 'select' && selectionKind === 'grid'
             ? `Drag to drop a ${gridParams.rows}×${gridParams.cols} dilution grid. Adjust rows/cols/size in the sidebar.`
+            : mode === 'select' && selectionKind === 'sampleAgar'
+            ? 'Click agar to capture a background color sample. Edge-click still deletes a region. Right-click or Escape cancels carrying.'
+            : mode === 'select' && selectionKind === 'sampleColony'
+            ? 'Click a representative colony to capture a color sample. Edge-click still deletes a region. Right-click or Escape cancels carrying.'
             : mode === 'add'
             ? 'Click empty space to add a colony. Click an existing colony to cycle: auto → confirmed → rejected.'
             : 'Click a colony to cycle: auto → confirmed → rejected. Switch to Add mode to place manually.'}
@@ -602,15 +690,16 @@ export function PlateViewer({
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
+        onContextMenu={e => {
+          if (carrying) {
+            e.preventDefault();
+            justPickedUp.current = false;
+            setCarrying(null);
+          }
+        }}
         onMouseLeave={() => {
           setIsPanning(false);
 
-          if (moving) {
-            if (didDrag.current && onMoveRegion && (Math.abs(moving.dx) > 1 || Math.abs(moving.dy) > 1)) {
-              onMoveRegion(moving.regionId, moving.dx, moving.dy);
-            }
-            setMoving(null);
-          }
           if (mode === 'select' && selectionKind === 'sphere'
               && drawStart.current && drawing && drawing.radius > 10 && didDrag.current) {
             onAddSphere({ cx: drawing.cx, cy: drawing.cy, radius: drawing.radius });
@@ -643,6 +732,10 @@ export function PlateViewer({
                   ? 'Draw a circle to select an analysis region'
                   : selectionKind === 'lasso'
                   ? 'Free-hand draw around an area to analyse'
+                  : selectionKind === 'sampleAgar'
+                  ? 'Click an agar-only patch to sample the background color'
+                  : selectionKind === 'sampleColony'
+                  ? 'Click a representative colony to sample its color'
                   : `Drag to drop a ${gridParams.rows}×${gridParams.cols} dilution grid`
                 : 'No colonies detected yet'}
             </p>
