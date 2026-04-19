@@ -8,7 +8,7 @@ export interface Colony {
   area: number;
   circularity: number;
   brightness: number;
-  /** 0–1: detection certainty, drives red/orange/green colouring */
+  /** 0–1: detection certainty, drives red/blue/green colouring */
   confidence: number;
   /** Gradient sharpness at boundary — high = true colony, low = shade/blur artifact */
   edgeSharpness: number;
@@ -46,7 +46,7 @@ export const DEFAULT_PARAMS: DetectionParams = {
   threshold: 0,
   minArea: 15,
   maxArea: 8000,
-  minCircularity: 0.25,
+  minCircularity: 0.6,
   blurRadius: 2,
   invertImage: false,
   watershed: true,

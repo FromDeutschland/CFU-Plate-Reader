@@ -174,6 +174,24 @@ interface Component {
   meanGray: number;
 }
 
+function estimatePerimeter(pixels: number[], binary: Uint8Array, w: number, h: number): number {
+  let perimeter = 0;
+  for (const idx of pixels) {
+    const x = idx % w;
+    const y = (idx / w) | 0;
+    const neighbours = [
+      x > 0 ? idx - 1 : -1,
+      x < w - 1 ? idx + 1 : -1,
+      y > 0 ? idx - w : -1,
+      y < h - 1 ? idx + w : -1,
+    ];
+    for (const n of neighbours) {
+      if (n < 0 || binary[n] === 0) perimeter += 1;
+    }
+  }
+  return perimeter;
+}
+
 function findComponents(binary: Uint8Array, w: number, h: number, gray: Uint8Array): Component[] {
   const labels = new Int32Array(binary.length).fill(-1);
   const comps: Component[] = [];
@@ -506,8 +524,9 @@ export function detectColonies(
 
   for (const comp of comps) {
     if (comp.area < params.minArea || comp.area > params.maxArea) continue;
-    const boundArea = comp.boundW * comp.boundH;
-    const circularity = boundArea > 0 ? comp.area / boundArea : 0;
+    const perimeter = estimatePerimeter(comp.pixels, binary, w, h);
+    if (perimeter <= 0) continue;
+    const circularity = (4 * Math.PI * comp.area) / (perimeter * perimeter);
     if (circularity < params.minCircularity) continue;
 
     const radius = Math.sqrt(comp.area / Math.PI);

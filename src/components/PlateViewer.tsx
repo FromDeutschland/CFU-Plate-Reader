@@ -178,6 +178,13 @@ export function PlateViewer({
     };
   }
 
+  function imageToScreen(x: number, y: number): { x: number; y: number } {
+    return {
+      x: pan.x + x * zoom,
+      y: pan.y + y * zoom,
+    };
+  }
+
   function colonyUnderPoint(x: number, y: number): Colony | null {
     for (let i = colonies.length - 1; i >= 0; i--) {
       const colony = colonies[i];
@@ -809,6 +816,56 @@ export function PlateViewer({
         }}
       >
         <canvas ref={canvasRef} className="absolute inset-0" />
+
+        {mode === 'select' && onDeleteRegion && regions.map(reg => {
+          const offset = reg.id === carrying?.regionId
+            ? {
+                x: carrying.cursorX - carrying.originalCx,
+                y: carrying.cursorY - carrying.originalCy,
+              }
+            : { x: 0, y: 0 };
+          const anchor = imageToScreen(reg.cx + offset.x + reg.radius, reg.cy + offset.y - reg.radius);
+          return (
+            <button
+              key={`delete-region-${reg.id}`}
+              type="button"
+              onMouseDown={e => e.stopPropagation()}
+              onClick={e => {
+                e.stopPropagation();
+                onDeleteRegion(reg.id);
+              }}
+              className="absolute flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-red-400/70 bg-slate-950/90 text-sm font-bold text-red-300 shadow"
+              style={{ left: anchor.x, top: anchor.y }}
+              title="Delete region"
+            >
+              ×
+            </button>
+          );
+        })}
+
+        {mode === 'add' && onDeleteColony && colonies.filter(c => c.status !== 'rejected').map(colony => {
+          const preview = editingColony?.colonyId === colony.id ? editingColony : null;
+          const anchor = imageToScreen(
+            (preview?.cx ?? colony.cx) + colony.radius,
+            (preview?.cy ?? colony.cy) - colony.radius
+          );
+          return (
+            <button
+              key={`delete-colony-${colony.id}`}
+              type="button"
+              onMouseDown={e => e.stopPropagation()}
+              onClick={e => {
+                e.stopPropagation();
+                onDeleteColony(colony.id);
+              }}
+              className="absolute flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-red-400/70 bg-slate-950/90 text-xs font-bold text-red-300 shadow"
+              style={{ left: anchor.x, top: anchor.y }}
+              title="Delete colony"
+            >
+              ×
+            </button>
+          );
+        })}
 
         {colonies.length === 0 && regions.length === 0 && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">

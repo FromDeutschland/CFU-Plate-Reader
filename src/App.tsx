@@ -25,6 +25,7 @@ let regionCounter = 0;
 const SAMPLE_RADIUS = 10;
 
 type SampleToolKind = 'sampleAgar' | 'sampleColony';
+type WizardStep = 'upload' | 'sample_agar' | 'sample_colony' | 'review_regions';
 
 function makeRegionLabel(idx: number): string {
   return `Region ${idx + 1}`;
@@ -157,9 +158,9 @@ export default function App() {
   const [params, setParams] = useState<DetectionParams>(DEFAULT_PARAMS);
 
   // ── UI state ────────────────────────────────────────────────────────────
+  const [step, setStep]                 = useState<WizardStep>('upload');
   const [mode, setMode]                 = useState<ViewerMode>('select');
   const [selectionKind, setSelectionKind] = useState<SelectionTool>('sphere');
-  const [gridParams, setGridParams]       = useState<GridParams>(DEFAULT_GRID);
   const [tableExpanded, setTableExpanded] = useState(true);
   const [agarSample, setAgarSample]       = useState<ColorSample | null>(null);
   const [colonySample, setColonySample]   = useState<ColorSample | null>(null);
@@ -181,17 +182,11 @@ export default function App() {
       setImageSize({ w: el.naturalWidth, h: el.naturalHeight });
       setEntries([]);
       setMode('select');
-      setSelectionKind('sphere');
+      setStep('sample_agar');
+      setSelectionKind('sampleAgar');
       setAgarSample(null);
       setColonySample(null);
-      setParams(prev => prev.calibration
-        ? {
-            ...prev,
-            threshold: DEFAULT_PARAMS.threshold,
-            invertImage: DEFAULT_PARAMS.invertImage,
-            calibration: undefined,
-          }
-        : prev);
+      setParams({ ...DEFAULT_PARAMS, calibration: undefined });
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to load image');
     } finally {
@@ -210,18 +205,15 @@ export default function App() {
       kind: 'sphere',
       label: makeRegionLabel(regionCounter - 1),
     };
-    const effectiveParams = getLearnedParams(params);
-    const colonies = detectColoniesInRegion(el, newRegion, effectiveParams);
 
     setEntries(prev => [...prev, {
       region: newRegion,
       dilutionFactor: 1000,
       volumeMl: 0.1,
-      colonies,
+      colonies: [],
       confirmed: false,
     }]);
-    setMode('review');
-  }, [params, getLearnedParams]);
+  }, []);
 
   // ── Add a lasso (freehand polygon) region ──────────────────────────────
   const handleAddLasso = useCallback((polygon: { x: number; y: number }[]) => {
@@ -246,18 +238,15 @@ export default function App() {
       polygon,
       label: makeRegionLabel(regionCounter - 1),
     };
-    const effectiveParams = getLearnedParams(params);
-    const colonies = detectColoniesInRegion(el, newRegion, effectiveParams);
 
     setEntries(prev => [...prev, {
       region: newRegion,
       dilutionFactor: 1000,
       volumeMl: 0.1,
-      colonies,
+      colonies: [],
       confirmed: false,
     }]);
-    setMode('review');
-  }, [params, getLearnedParams]);
+  }, []);
 
   // ── Manual dilution grid: drop rows×cols sphere regions inside a bounding rect ──
   const handleAddGrid = useCallback((
@@ -485,22 +474,29 @@ export default function App() {
     const sample = captureColorSample(imgElRef.current, cx, cy, SAMPLE_RADIUS);
     if (kind === 'sampleAgar') {
       setAgarSample(sample);
+      setStep('sample_colony');
+      setSelectionKind('sampleColony');
       return;
     }
     setColonySample(sample);
+    setStep('review_regions');
+    setSelectionKind('sphere');
+    setMode('select');
   }, []);
 
-  const handleApplyCalibration = useCallback(() => {
-    if (!pendingCalibration) return;
+  const handleCountColonies = useCallback(() => {
+    const calibration = pendingCalibration ?? params.calibration;
+    if (!calibration || entries.length === 0) return;
     const nextParams: DetectionParams = {
       ...params,
-      threshold: pendingCalibration.threshold,
-      invertImage: pendingCalibration.invertImage,
-      calibration: pendingCalibration,
+      threshold: calibration.threshold,
+      invertImage: calibration.invertImage,
+      calibration,
     };
     setParams(nextParams);
     rerunWithParams(nextParams);
-  }, [params, pendingCalibration, rerunWithParams]);
+    setMode('review');
+  }, [entries.length, params, pendingCalibration, rerunWithParams]);
 
   // ── Clear all colonies (keep regions) ─────────────────────────────────
   const handleClearAll = useCallback(() => {
@@ -542,6 +538,14 @@ export default function App() {
   const allColonies     = entries.flatMap(e => e.colonies);
   const allRegions      = entries.map(e => e.region);
   const activeColonies  = allColonies.filter(c => c.status !== 'rejected');
+  const canCountColonies = step === 'review_regions' && entries.length > 0 && !!(pendingCalibration ?? params.calibration);
+  const stepMessage = step === 'sample_agar'
+    ? 'Step 1 of 3: click a clean agar-only patch to calibrate the background.'
+    : step === 'sample_colony'
+    ? 'Step 2 of 3: click a representative colony so OmniCount can maximize contrast.'
+    : step === 'review_regions'
+    ? 'Step 3 of 3: draw your analysis regions on the plate, then press Count Colonies.'
+    : 'Upload a plate image to begin.';
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-slate-900">
@@ -559,17 +563,12 @@ export default function App() {
                 setImageSrc(null);
                 setEntries([]);
                 imgElRef.current = null;
+                setStep('upload');
+                setMode('select');
                 setAgarSample(null);
                 setColonySample(null);
                 setSelectionKind('sphere');
-                setParams(prev => prev.calibration
-                  ? {
-                      ...prev,
-                      threshold: DEFAULT_PARAMS.threshold,
-                      invertImage: DEFAULT_PARAMS.invertImage,
-                      calibration: undefined,
-                    }
-                  : prev);
+                setParams({ ...DEFAULT_PARAMS, calibration: undefined });
               }}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm transition-colors"
             >
@@ -602,6 +601,14 @@ export default function App() {
         </div>
       ) : (
         <div className="flex-1 flex flex-col min-h-0">
+          <div className="shrink-0 border-b border-slate-800 bg-slate-900/80 px-5 py-2.5">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm text-slate-300">{stepMessage}</p>
+              <span className="rounded-full border border-slate-700 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                {step.replace('_', ' ')}
+              </span>
+            </div>
+          </div>
           {/* Viewer + sidebar */}
           <div className="flex flex-1 min-h-0 overflow-hidden">
             {/* Plate viewer */}
@@ -614,7 +621,7 @@ export default function App() {
                 regions={allRegions}
                 mode={mode}
                 selectionKind={selectionKind}
-                gridParams={gridParams}
+                gridParams={DEFAULT_GRID}
                 onToggleColony={handleToggleColony}
                 onAddManual={handleAddManual}
                 onDeleteColony={handleDeleteColony}
@@ -638,22 +645,21 @@ export default function App() {
                   onChange={setParams}
                   onRerun={handleRerun}
                   onClearAll={handleClearAll}
-                  onAutoGridFit={handleAutoGridFit}
                   trainingCount={totalSamples}
                   sessionCount={session.sessionCount}
+                  step={step}
                   mode={mode}
                   onModeChange={setMode}
                   selectionKind={selectionKind}
                   onSelectionKindChange={setSelectionKind}
-                  gridParams={gridParams}
-                  onGridParamsChange={setGridParams}
                   regionCount={entries.length}
                   colonyCount={activeColonies.length}
                   agarSample={agarSample}
                   colonySample={colonySample}
                   calibration={params.calibration}
                   pendingCalibration={pendingCalibration}
-                  onApplyCalibration={handleApplyCalibration}
+                  canCountColonies={canCountColonies}
+                  onCountColonies={handleCountColonies}
                 />
               </div>
             </aside>

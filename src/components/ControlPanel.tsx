@@ -1,38 +1,38 @@
 import { useState } from 'react';
 import {
   RefreshCw, Zap, Brain, CircleDot, MousePointer, Plus, Lasso,
-  Grid3x3, Sparkles, Sun, ChevronDown, ChevronRight,
+  Sparkles, Sun, ChevronDown, ChevronRight,
 } from 'lucide-react';
 import type {
   Calibration,
   ColorSample,
   DetectionParams,
-  GridParams,
   SelectionTool,
 } from '../types';
 import type { ViewerMode } from './PlateViewer';
+
+type WizardStep = 'upload' | 'sample_agar' | 'sample_colony' | 'review_regions';
 
 interface Props {
   params: DetectionParams;
   onChange: (p: DetectionParams) => void;
   onRerun: () => void;
   onClearAll: () => void;
-  onAutoGridFit: () => void;
   trainingCount: number;
   sessionCount: number;
+  step: WizardStep;
   mode: ViewerMode;
   onModeChange: (m: ViewerMode) => void;
   selectionKind: SelectionTool;
   onSelectionKindChange: (k: SelectionTool) => void;
-  gridParams: GridParams;
-  onGridParamsChange: (g: GridParams) => void;
   regionCount: number;
   colonyCount: number;
   agarSample: ColorSample | null;
   colonySample: ColorSample | null;
   calibration?: Calibration;
   pendingCalibration: Calibration | null;
-  onApplyCalibration: () => void;
+  canCountColonies: boolean;
+  onCountColonies: () => void;
 }
 
 function Slider({
@@ -124,26 +124,19 @@ const MODES: { id: ViewerMode; icon: typeof CircleDot; label: string; hint: stri
 const SELECTION_TOOLS: { id: SelectionTool; icon: typeof CircleDot; label: string }[] = [
   { id: 'sphere', icon: CircleDot, label: 'Sphere' },
   { id: 'lasso',  icon: Lasso,     label: 'Lasso'  },
-  { id: 'grid',   icon: Grid3x3,   label: 'Grid'   },
-  { id: 'sampleAgar', icon: Sun, label: 'Agar' },
-  { id: 'sampleColony', icon: Sparkles, label: 'Colony' },
 ];
 
 export function ControlPanel({
-  params, onChange, onRerun, onClearAll, onAutoGridFit,
-  trainingCount, sessionCount,
+  params, onChange, onRerun, onClearAll,
+  trainingCount, sessionCount, step,
   mode, onModeChange,
   selectionKind, onSelectionKindChange,
-  gridParams, onGridParamsChange,
   regionCount, colonyCount,
   agarSample, colonySample,
-  calibration, pendingCalibration, onApplyCalibration,
+  calibration, pendingCalibration, canCountColonies, onCountColonies,
 }: Props) {
   function set<K extends keyof DetectionParams>(key: K, val: DetectionParams[K]) {
     onChange({ ...params, [key]: val });
-  }
-  function setGrid<K extends keyof GridParams>(key: K, val: GridParams[K]) {
-    onGridParamsChange({ ...gridParams, [key]: val });
   }
   function renderSampleCard(label: string, sample: ColorSample | null, accent: string) {
     return (
@@ -162,8 +155,37 @@ export function ControlPanel({
     );
   }
 
+  const stepPrompt = step === 'sample_agar'
+    ? 'Click a clean agar patch on the image to sample the plate background.'
+    : step === 'sample_colony'
+    ? 'Click a representative colony so the projection can separate colony from agar.'
+    : 'Draw one or more regions directly on the image, then count colonies when you are ready.';
+  const primaryActionLabel = step === 'review_regions' && mode === 'select'
+    ? 'Count Colonies'
+    : 'Re-detect';
+  const primaryAction = step === 'review_regions' && mode === 'select'
+    ? onCountColonies
+    : onRerun;
+  const primaryDisabled = step === 'review_regions' && mode === 'select'
+    ? !canCountColonies
+    : regionCount === 0;
+
   return (
     <div className="space-y-4">
+      <div className="rounded-xl border border-blue-700/30 bg-blue-950/20 px-3 py-3">
+        <div className="flex items-center gap-2">
+          <span className="rounded-full bg-blue-500/15 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-blue-300">
+            {step.replace('_', ' ')}
+          </span>
+          {calibration && (
+            <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
+              Calibrated
+            </span>
+          )}
+        </div>
+        <p className="mt-2 text-sm text-slate-200">{stepPrompt}</p>
+      </div>
+
       {/* Status counts — most important information post-upload */}
       <div className="grid grid-cols-2 gap-2">
         <div className="bg-slate-800/60 rounded-lg px-3 py-2 text-center">
@@ -177,6 +199,7 @@ export function ControlPanel({
       </div>
 
       {/* Mode switcher — compact pills */}
+      {step === 'review_regions' && (
       <div>
         <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Tool</p>
         <div className="flex gap-1 p-1 bg-slate-800/60 rounded-lg">
@@ -200,9 +223,10 @@ export function ControlPanel({
           {MODES.find(m => m.id === mode)?.hint}
         </p>
       </div>
+      )}
 
       {/* Selection tool picker — only shown while in Select mode */}
-      {mode === 'select' && (
+      {step === 'review_regions' && mode === 'select' && (
         <div>
           <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Selection Shape</p>
           <div className="grid grid-cols-2 gap-1 p-1 bg-slate-800/60 rounded-lg">
@@ -221,78 +245,6 @@ export function ControlPanel({
               </button>
             ))}
           </div>
-
-          {/* Grid geometry sliders — only when Grid tool is selected */}
-          {selectionKind === 'grid' && (
-            <div className="mt-3 p-3 rounded-lg bg-amber-950/30 border border-amber-700/30 space-y-3">
-              <p className="text-[11px] text-amber-300/90 leading-snug">
-                Drag a rectangle across your dilution row(s). A <strong>{gridParams.rows} × {gridParams.cols}</strong> grid of spheres will be dropped and labelled 10⁻¹ … 10⁻{gridParams.cols}.
-              </p>
-              <Slider
-                label="Rows"
-                value={gridParams.rows}
-                min={1}
-                max={10}
-                step={1}
-                onChange={v => setGrid('rows', v)}
-                displayValue={String(gridParams.rows)}
-              />
-              <Slider
-                label="Columns"
-                value={gridParams.cols}
-                min={1}
-                max={12}
-                step={1}
-                onChange={v => setGrid('cols', v)}
-                displayValue={String(gridParams.cols)}
-              />
-              <Slider
-                label="Sphere size"
-                value={Math.round(gridParams.sphereScale * 100)}
-                min={20}
-                max={95}
-                step={5}
-                onChange={v => setGrid('sphereScale', v / 100)}
-                displayValue={`${Math.round(gridParams.sphereScale * 100)}%`}
-                hint="% of cell used by each sphere"
-              />
-              {/* Quick presets for typical dilution-series layouts */}
-              <div>
-                <div className="text-[11px] text-slate-400 mb-1">Quick presets</div>
-                <div className="grid grid-cols-3 gap-1">
-                  {[
-                    { label: '1×6', rows: 1, cols: 6 },
-                    { label: '1×8', rows: 1, cols: 8 },
-                    { label: '2×6', rows: 2, cols: 6 },
-                    { label: '3×4', rows: 3, cols: 4 },
-                    { label: '4×6', rows: 4, cols: 6 },
-                    { label: '1×10', rows: 1, cols: 10 },
-                  ].map(p => (
-                    <button
-                      key={p.label}
-                      onClick={() => onGridParamsChange({ ...gridParams, rows: p.rows, cols: p.cols })}
-                      className={`py-1 rounded text-[11px] font-medium transition-colors ${
-                        gridParams.rows === p.rows && gridParams.cols === p.cols
-                          ? 'bg-amber-600 text-white'
-                          : 'bg-slate-700/60 text-slate-300 hover:bg-slate-700'
-                      }`}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          <button
-            onClick={onAutoGridFit}
-            className="w-full mt-2 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/40 text-purple-200 text-xs font-medium transition-colors"
-            title="Auto-detect dilution-series spots and create regions over each"
-          >
-            <Grid3x3 className="w-3.5 h-3.5" />
-            Auto-detect dilution spots
-          </button>
 
           <div className="mt-3 space-y-3 rounded-lg border border-cyan-700/30 bg-cyan-950/20 p-3">
             <div className="flex items-center justify-between gap-2">
@@ -321,14 +273,6 @@ export function ControlPanel({
                 {pendingCalibration.invertImage ? 'Colonies are darker than agar' : 'Colonies are brighter than agar'}
               </div>
             )}
-
-            <button
-              onClick={onApplyCalibration}
-              disabled={!pendingCalibration}
-              className="w-full rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Calibrate & Re-detect
-            </button>
           </div>
         </div>
       )}
@@ -336,12 +280,12 @@ export function ControlPanel({
       {/* Primary actions */}
       <div className="flex gap-2">
         <button
-          onClick={onRerun}
-          disabled={regionCount === 0}
+          onClick={primaryAction}
+          disabled={primaryDisabled}
           className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors shadow"
         >
           <Zap className="w-4 h-4" />
-          Re-detect
+          {primaryActionLabel}
         </button>
         <button
           onClick={onClearAll}
@@ -412,15 +356,6 @@ export function ControlPanel({
             step={5}
             onChange={v => set('minArea', v)}
             displayValue={`${params.minArea} px²`}
-          />
-          <Slider
-            label="Max colony size"
-            value={params.maxArea}
-            min={200}
-            max={50000}
-            step={100}
-            onChange={v => set('maxArea', v)}
-            displayValue={`${params.maxArea} px²`}
           />
           <Slider
             label="Min roundness"
