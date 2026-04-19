@@ -39,6 +39,11 @@ interface Props {
     agar: ColorSample | null;
     colony: ColorSample | null;
   };
+  maskedCalibrationSamples?: {
+    agar: ColorSample | null;
+    colony: ColorSample | null;
+  };
+  calibrationSamplesVisible?: boolean;
   onCaptureSample?: (kind: 'sampleAgar' | 'sampleColony', cx: number, cy: number) => void;
   onDeleteSample?: (kind: 'sampleAgar' | 'sampleColony') => void;
 }
@@ -119,7 +124,9 @@ export function PlateViewer({
   colonies, regions, mode, selectionKind, gridParams,
   onToggleColony, onAddManual, onDeleteColony, onMoveColony, onResizeColony,
   onAddSphere, onAddLasso, onAddGrid,
-  onDeleteRegion, onMoveRegion, onResizeRegion, calibrationSamples, onCaptureSample, onDeleteSample,
+  onDeleteRegion, onMoveRegion, onResizeRegion,
+  calibrationSamples, maskedCalibrationSamples, calibrationSamplesVisible = true,
+  onCaptureSample, onDeleteSample,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef    = useRef<HTMLCanvasElement>(null);
@@ -235,6 +242,7 @@ export function PlateViewer({
     x: number,
     y: number
   ): { kind: 'sampleAgar' | 'sampleColony'; sample: ColorSample } | null {
+    if (!calibrationSamplesVisible) return null;
     const samples = [
       { kind: 'sampleColony' as const, sample: calibrationSamples?.colony },
       { kind: 'sampleAgar' as const, sample: calibrationSamples?.agar },
@@ -261,6 +269,31 @@ export function PlateViewer({
     ctx.scale(zoom, zoom);
 
     ctx.drawImage(img, 0, 0);
+
+    if (maskedCalibrationSamples?.agar) {
+      const maskColor = `rgba(${Math.round(maskedCalibrationSamples.agar.meanR)}, ${Math.round(maskedCalibrationSamples.agar.meanG)}, ${Math.round(maskedCalibrationSamples.agar.meanB)}, 0.92)`;
+      const outerColor = `rgba(${Math.round(maskedCalibrationSamples.agar.meanR)}, ${Math.round(maskedCalibrationSamples.agar.meanG)}, ${Math.round(maskedCalibrationSamples.agar.meanB)}, 0.42)`;
+      for (const sample of [maskedCalibrationSamples.colony, maskedCalibrationSamples.agar]) {
+        if (!sample) continue;
+        ctx.save();
+        const gradient = ctx.createRadialGradient(
+          sample.cx,
+          sample.cy,
+          Math.max(1, sample.radius * 0.15),
+          sample.cx,
+          sample.cy,
+          sample.radius * 1.35
+        );
+        gradient.addColorStop(0, maskColor);
+        gradient.addColorStop(0.75, maskColor);
+        gradient.addColorStop(1, outerColor);
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(sample.cx, sample.cy, sample.radius * 1.35, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
 
     // Active carry offset (only applies to the region being repositioned)
     const moveId = carrying?.regionId;
@@ -317,41 +350,43 @@ export function PlateViewer({
       ctx.restore();
     });
 
-    const samples = [
-      {
-        kind: 'sampleAgar' as const,
-        sample: calibrationSamples?.agar,
-        color: '#f59e0b',
-        label: 'Agar',
-      },
-      {
-        kind: 'sampleColony' as const,
-        sample: calibrationSamples?.colony,
-        color: '#d946ef',
-        label: 'Colony',
-      },
-    ];
-    for (const item of samples) {
-      if (!item.sample) continue;
-      const preview = editingSample?.kind === item.kind ? editingSample : null;
-      const drawCx = preview?.cx ?? item.sample.cx;
-      const drawCy = preview?.cy ?? item.sample.cy;
-      const drawRadius = preview?.radius ?? item.sample.radius;
-      ctx.save();
-      ctx.setLineDash([5 / zoom, 3 / zoom]);
-      ctx.strokeStyle = item.color;
-      ctx.lineWidth = 2 / zoom;
-      ctx.fillStyle = `${item.color}22`;
-      ctx.beginPath();
-      ctx.arc(drawCx, drawCy, drawRadius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.font = `${Math.max(11, 13 / zoom)}px ui-sans-serif, sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.fillStyle = item.color;
-      ctx.fillText(item.label, drawCx, drawCy - drawRadius - 6 / zoom);
-      ctx.restore();
+    if (calibrationSamplesVisible) {
+      const samples = [
+        {
+          kind: 'sampleAgar' as const,
+          sample: calibrationSamples?.agar,
+          color: '#f59e0b',
+          label: 'Agar',
+        },
+        {
+          kind: 'sampleColony' as const,
+          sample: calibrationSamples?.colony,
+          color: '#d946ef',
+          label: 'Colony',
+        },
+      ];
+      for (const item of samples) {
+        if (!item.sample) continue;
+        const preview = editingSample?.kind === item.kind ? editingSample : null;
+        const drawCx = preview?.cx ?? item.sample.cx;
+        const drawCy = preview?.cy ?? item.sample.cy;
+        const drawRadius = preview?.radius ?? item.sample.radius;
+        ctx.save();
+        ctx.setLineDash([5 / zoom, 3 / zoom]);
+        ctx.strokeStyle = item.color;
+        ctx.lineWidth = 2 / zoom;
+        ctx.fillStyle = `${item.color}22`;
+        ctx.beginPath();
+        ctx.arc(drawCx, drawCy, drawRadius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = `${Math.max(11, 13 / zoom)}px ui-sans-serif, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = item.color;
+        ctx.fillText(item.label, drawCx, drawCy - drawRadius - 6 / zoom);
+        ctx.restore();
+      }
     }
 
     // ── Draw in-progress sphere ─────────────────────────────────────────
@@ -922,12 +957,12 @@ export function PlateViewer({
       </div>
 
       {/* Mode hint */}
-      <div className="px-3 py-1.5 bg-slate-900/60 border-b border-slate-800 shrink-0">
+      <div className="min-h-[38px] px-3 py-1.5 bg-slate-900/60 border-b border-slate-800 shrink-0 flex items-center">
         <p className="text-xs text-slate-500">
           {mode === 'select' && selectionKind === 'sphere'
-            ? 'Drag to draw · Scroll while drawing to resize · Click inside a region to pick it up · Click again to drop · Drag a region edge to resize · Drag color samples to adjust them.'
+            ? `Drag to draw · Scroll while drawing to resize · Click inside a region to pick it up · Click again to drop · Drag a region edge to resize${calibrationSamplesVisible ? ' · Drag color samples to adjust them.' : '.'}`
             : mode === 'select' && selectionKind === 'lasso'
-            ? 'Drag to freehand-draw · Click inside a region to pick it up · Click again to drop · Edge-click deletes · Drag color samples to adjust them.'
+            ? `Drag to freehand-draw · Click inside a region to pick it up · Click again to drop · Edge-click deletes${calibrationSamplesVisible ? ' · Drag color samples to adjust them.' : '.'}`
             : mode === 'select' && selectionKind === 'grid'
             ? `Drag to drop a ${gridParams.rows}×${gridParams.cols} dilution grid. Adjust rows/cols/size in the sidebar.`
             : mode === 'select' && selectionKind === 'sampleAgar'
@@ -1039,7 +1074,7 @@ export function PlateViewer({
           );
         })}
 
-        {mode === 'select' && onDeleteSample && [
+        {mode === 'select' && calibrationSamplesVisible && onDeleteSample && [
           {
             kind: 'sampleAgar' as const,
             sample: calibrationSamples?.agar,

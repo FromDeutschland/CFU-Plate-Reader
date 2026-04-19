@@ -26,6 +26,7 @@ const SAMPLE_RADIUS = 10;
 
 type SampleToolKind = 'sampleAgar' | 'sampleColony';
 type WizardStep = 'upload' | 'sample_agar' | 'sample_colony' | 'review_regions';
+type SampleDraft = { kind: SampleToolKind; sample: ColorSample } | null;
 
 function makeRegionLabel(idx: number): string {
   return `Region ${idx + 1}`;
@@ -144,6 +145,13 @@ function deriveCalibration(agarSample: ColorSample, colonySample: ColorSample): 
   };
 }
 
+function overlapsSample(colony: Colony, sample: ColorSample): boolean {
+  const dx = colony.cx - sample.cx;
+  const dy = colony.cy - sample.cy;
+  const exclusionRadius = colony.radius + sample.radius * 1.25;
+  return dx * dx + dy * dy <= exclusionRadius * exclusionRadius;
+}
+
 export default function App() {
   // ── Image state ────────────────────────────────────────────────────────
   const [imageSrc, setImageSrc]     = useState<string | null>(null);
@@ -164,10 +172,11 @@ export default function App() {
   const [tableExpanded, setTableExpanded] = useState(true);
   const [agarSample, setAgarSample]       = useState<ColorSample | null>(null);
   const [colonySample, setColonySample]   = useState<ColorSample | null>(null);
+  const [draftSample, setDraftSample]     = useState<SampleDraft>(null);
 
   // ── Training ───────────────────────────────────────────────────────────
   const { session, recordAccepted, recordRejected, getLearnedParams, resetTraining, totalSamples } = useTrainingData();
-  const pendingCalibration = agarSample && colonySample
+  const lockedCalibration = agarSample && colonySample
     ? deriveCalibration(agarSample, colonySample)
     : null;
 
@@ -180,6 +189,17 @@ export default function App() {
     }));
   }, []);
 
+  const detectRegionColonies = useCallback((region: SelectionRegion, baseParams: DetectionParams = params) => {
+    if (!imgElRef.current || !baseParams.calibration) return [];
+    const calibration = baseParams.calibration;
+    const effectiveParams = getLearnedParams(baseParams);
+    const detected = detectColoniesInRegion(imgElRef.current, region, effectiveParams);
+    return detected.filter(colony => {
+      return !overlapsSample(colony, calibration.agarSample)
+        && !overlapsSample(colony, calibration.colonySample);
+    });
+  }, [getLearnedParams, params]);
+
   // ── Load image ─────────────────────────────────────────────────────────
   const handleFileLoaded = useCallback(async (file: File) => {
     setImgLoading(true);
@@ -191,10 +211,11 @@ export default function App() {
       setImageSize({ w: el.naturalWidth, h: el.naturalHeight });
       setEntries([]);
       setMode('select');
-      setStep('sample_agar');
-      setSelectionKind('sampleAgar');
+      setStep('sample_colony');
+      setSelectionKind('sampleColony');
       setAgarSample(null);
       setColonySample(null);
+      setDraftSample(null);
       setParams({ ...DEFAULT_PARAMS, calibration: undefined });
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to load image');
@@ -206,7 +227,6 @@ export default function App() {
   // ── Add a sphere region (drawn on canvas) ──────────────────────────────
   const handleAddSphere = useCallback((raw: { cx: number; cy: number; radius: number }) => {
     if (!imgElRef.current) return;
-    const el = imgElRef.current;
     const id = `region-${++regionCounter}`;
     const newRegion: SelectionRegion = {
       ...raw,
@@ -214,20 +234,20 @@ export default function App() {
       kind: 'sphere',
       label: makeRegionLabel(regionCounter - 1),
     };
+    const colonies = detectRegionColonies(newRegion);
 
     setEntries(prev => [...prev, {
       region: newRegion,
       dilutionFactor: 1000,
       volumeMl: 0.1,
-      colonies: [],
+      colonies,
       confirmed: false,
     }]);
-  }, []);
+  }, [detectRegionColonies]);
 
   // ── Add a lasso (freehand polygon) region ──────────────────────────────
   const handleAddLasso = useCallback((polygon: { x: number; y: number }[]) => {
     if (!imgElRef.current) return;
-    const el = imgElRef.current;
     let sx = 0, sy = 0, minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const p of polygon) {
       sx += p.x; sy += p.y;
@@ -247,15 +267,16 @@ export default function App() {
       polygon,
       label: makeRegionLabel(regionCounter - 1),
     };
+    const colonies = detectRegionColonies(newRegion);
 
     setEntries(prev => [...prev, {
       region: newRegion,
       dilutionFactor: 1000,
       volumeMl: 0.1,
-      colonies: [],
+      colonies,
       confirmed: false,
     }]);
-  }, []);
+  }, [detectRegionColonies]);
 
   // ── Manual dilution grid: drop rows×cols sphere regions inside a bounding rect ──
   const handleAddGrid = useCallback((
@@ -354,22 +375,20 @@ export default function App() {
     regionId: string,
     transform: (region: SelectionRegion) => SelectionRegion
   ) => {
-    const img = imgElRef.current;
-    const effectiveParams = getLearnedParams(params);
     setEntries(prev => prev.map(entry => {
       if (entry.region.id !== regionId) return entry;
       const region = transform(entry.region);
-      if (!img || mode !== 'review') {
+      if (!params.calibration) {
         return { ...entry, region };
       }
       return {
         ...entry,
         confirmed: false,
         region,
-        colonies: detectColoniesInRegion(img, region, effectiveParams),
+        colonies: detectRegionColonies(region, params),
       };
     }));
-  }, [getLearnedParams, mode, params]);
+  }, [detectRegionColonies, params]);
 
   // ── Move a region (drag-reposition) ────────────────────────────────────
   const handleMoveRegion = useCallback((regionId: string, dx: number, dy: number) => {
@@ -486,15 +505,12 @@ export default function App() {
 
   // ── Re-run detection on all regions ───────────────────────────────────
   const rerunWithParams = useCallback((baseParams: DetectionParams) => {
-    if (!imgElRef.current) return;
-    const el = imgElRef.current;
-    const effectiveParams = getLearnedParams(baseParams);
     setEntries(prev => prev.map(entry => ({
       ...entry,
       confirmed: false,
-      colonies:  detectColoniesInRegion(el, entry.region, effectiveParams),
+      colonies: detectRegionColonies(entry.region, baseParams),
     })));
-  }, [getLearnedParams]);
+  }, [detectRegionColonies]);
 
   const handleRerun = useCallback(() => {
     rerunWithParams(params);
@@ -503,37 +519,23 @@ export default function App() {
   const handleCaptureSample = useCallback((kind: SampleToolKind, cx: number, cy: number) => {
     if (!imgElRef.current) return;
     const sample = captureColorSample(imgElRef.current, cx, cy, SAMPLE_RADIUS);
-    clearAppliedCalibration();
-    if (kind === 'sampleAgar') {
-      setAgarSample(sample);
-      setStep('sample_colony');
-      setSelectionKind('sampleColony');
-      return;
-    }
-    setColonySample(sample);
-    setStep('review_regions');
-    setSelectionKind('sphere');
-    setMode('select');
-  }, [clearAppliedCalibration]);
+    setDraftSample({ kind, sample });
+  }, []);
 
-  const handleDeleteSample = useCallback((kind: SampleToolKind) => {
+  const handleConfirmSample = useCallback(() => {
+    if (!draftSample) return;
     clearAppliedCalibration();
-    if (kind === 'sampleAgar') {
-      setAgarSample(null);
+    if (draftSample.kind === 'sampleColony') {
+      setColonySample(draftSample.sample);
+      setDraftSample(null);
       setStep('sample_agar');
       setSelectionKind('sampleAgar');
-      setMode('select');
       return;
     }
-    setColonySample(null);
-    setStep('sample_colony');
-    setSelectionKind('sampleColony');
-    setMode('select');
-  }, [clearAppliedCalibration]);
-
-  const handleCountColonies = useCallback(() => {
-    const calibration = pendingCalibration;
-    if (!calibration || entries.length === 0) return;
+    if (!colonySample) return;
+    setAgarSample(draftSample.sample);
+    setDraftSample(null);
+    const calibration = deriveCalibration(draftSample.sample, colonySample);
     const nextParams: DetectionParams = {
       ...params,
       threshold: calibration.threshold,
@@ -541,9 +543,35 @@ export default function App() {
       calibration,
     };
     setParams(nextParams);
-    rerunWithParams(nextParams);
-    setMode('review');
-  }, [entries.length, params, pendingCalibration, rerunWithParams]);
+    setStep('review_regions');
+    setSelectionKind('sphere');
+    setMode('select');
+    if (entries.length > 0) {
+      rerunWithParams(nextParams);
+    }
+  }, [clearAppliedCalibration, colonySample, draftSample, entries.length, params, rerunWithParams]);
+
+  const handleRetakeDraftSample = useCallback(() => {
+    setDraftSample(null);
+  }, []);
+
+  const handleDeleteSample = useCallback((kind: SampleToolKind) => {
+    clearAppliedCalibration();
+    setDraftSample(null);
+    setEntries(prev => prev.map(entry => ({ ...entry, colonies: [], confirmed: false })));
+    if (kind === 'sampleColony') {
+      setColonySample(null);
+      setAgarSample(null);
+      setStep('sample_colony');
+      setSelectionKind('sampleColony');
+      setMode('select');
+      return;
+    }
+    setAgarSample(null);
+    setStep('sample_agar');
+    setSelectionKind('sampleAgar');
+    setMode('select');
+  }, [clearAppliedCalibration]);
 
   // ── Clear all colonies (keep regions) ─────────────────────────────────
   const handleClearAll = useCallback(() => {
@@ -585,13 +613,31 @@ export default function App() {
   const allColonies     = entries.flatMap(e => e.colonies);
   const allRegions      = entries.map(e => e.region);
   const activeColonies  = allColonies.filter(c => c.status !== 'rejected');
-  const canCountColonies = step === 'review_regions' && entries.length > 0 && !!pendingCalibration;
-  const stepMessage = step === 'sample_agar'
-    ? 'Step 1 of 3: click a clean agar-only patch to calibrate the background.'
-    : step === 'sample_colony'
-    ? 'Step 2 of 3: click a representative colony so OmniCount can maximize contrast.'
+  const calibrationReady = !!lockedCalibration;
+  const viewerCalibrationSamples = step === 'review_regions' && !draftSample
+    ? { agar: null, colony: null }
+    : {
+        agar: draftSample?.kind === 'sampleAgar' ? draftSample.sample : agarSample,
+        colony: draftSample?.kind === 'sampleColony' ? draftSample.sample : colonySample,
+      };
+  const maskedCalibrationSamples = calibrationReady && step === 'review_regions' && !draftSample
+    ? {
+        agar: lockedCalibration.agarSample,
+        colony: lockedCalibration.colonySample,
+      }
+    : undefined;
+  const stepMessage = step === 'sample_colony'
+    ? draftSample?.kind === 'sampleColony'
+      ? 'Step 1 of 3: confirm this colony sample, or retake it if it is not representative.'
+      : 'Step 1 of 3: click a representative colony to anchor the colony color.'
+    : step === 'sample_agar'
+    ? draftSample?.kind === 'sampleAgar'
+      ? 'Step 2 of 3: confirm this agar sample, or retake it if the patch is not clean.'
+      : 'Step 2 of 3: click a clean agar-only patch to anchor the background color.'
     : step === 'review_regions'
-    ? 'Step 3 of 3: draw your analysis regions on the plate, then press Count Colonies.'
+    ? entries.length === 0
+      ? 'Step 3 of 3: draw the counting area. Detection runs automatically as soon as you finish the shape.'
+      : 'Counting areas update automatically from the locked calibration. Draw another area or refine the detections.'
     : 'Upload a plate image to begin.';
 
   return (
@@ -614,6 +660,7 @@ export default function App() {
                 setMode('select');
                 setAgarSample(null);
                 setColonySample(null);
+                setDraftSample(null);
                 setSelectionKind('sphere');
                 setParams({ ...DEFAULT_PARAMS, calibration: undefined });
               }}
@@ -649,7 +696,7 @@ export default function App() {
       ) : (
         <div className="flex-1 flex flex-col min-h-0">
           <div className="shrink-0 border-b border-slate-800 bg-slate-900/80 px-5 py-2.5">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex min-h-[44px] items-center justify-between gap-3">
               <p className="text-sm text-slate-300">{stepMessage}</p>
               <span className="rounded-full border border-slate-700 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                 {step.replace('_', ' ')}
@@ -680,7 +727,9 @@ export default function App() {
                 onDeleteRegion={handleDeleteRegion}
                 onMoveRegion={handleMoveRegion}
                 onResizeRegion={handleResizeRegion}
-                calibrationSamples={{ agar: agarSample, colony: colonySample }}
+                calibrationSamples={viewerCalibrationSamples}
+                maskedCalibrationSamples={maskedCalibrationSamples}
+                calibrationSamplesVisible={step !== 'review_regions' || !!draftSample}
                 onCaptureSample={handleCaptureSample}
                 onDeleteSample={handleDeleteSample}
               />
@@ -705,10 +754,12 @@ export default function App() {
                   colonyCount={activeColonies.length}
                   agarSample={agarSample}
                   colonySample={colonySample}
+                  draftSample={draftSample}
                   calibration={params.calibration}
-                  pendingCalibration={pendingCalibration}
-                  canCountColonies={canCountColonies}
-                  onCountColonies={handleCountColonies}
+                  calibrationReady={calibrationReady}
+                  onConfirmSample={handleConfirmSample}
+                  onRetakeSample={handleRetakeDraftSample}
+                  onReselectSample={handleDeleteSample}
                 />
               </div>
             </aside>
