@@ -171,6 +171,15 @@ export default function App() {
     ? deriveCalibration(agarSample, colonySample)
     : null;
 
+  const clearAppliedCalibration = useCallback(() => {
+    setParams(prev => ({
+      ...prev,
+      threshold: DEFAULT_PARAMS.threshold,
+      invertImage: DEFAULT_PARAMS.invertImage,
+      calibration: undefined,
+    }));
+  }, []);
+
   // ── Load image ─────────────────────────────────────────────────────────
   const handleFileLoaded = useCallback(async (file: File) => {
     setImgLoading(true);
@@ -341,22 +350,44 @@ export default function App() {
     setEntries(prev => prev.filter(e => e.region.id !== regionId));
   }, []);
 
-  // ── Move a region (drag-reposition) ────────────────────────────────────
-  // Shifts the region centre (and polygon, if lasso) plus every colony it owns
-  // by the same (dx, dy) so the user can relocate a mis-placed selection.
-  const handleMoveRegion = useCallback((regionId: string, dx: number, dy: number) => {
-    setEntries(prev => prev.map(e => {
-      if (e.region.id !== regionId) return e;
-      const region: SelectionRegion = {
-        ...e.region,
-        cx: e.region.cx + dx,
-        cy: e.region.cy + dy,
-        polygon: e.region.polygon?.map(p => ({ x: p.x + dx, y: p.y + dy })),
+  const transformRegionEntry = useCallback((
+    regionId: string,
+    transform: (region: SelectionRegion) => SelectionRegion
+  ) => {
+    const img = imgElRef.current;
+    const effectiveParams = getLearnedParams(params);
+    setEntries(prev => prev.map(entry => {
+      if (entry.region.id !== regionId) return entry;
+      const region = transform(entry.region);
+      if (!img || mode !== 'review') {
+        return { ...entry, region };
+      }
+      return {
+        ...entry,
+        confirmed: false,
+        region,
+        colonies: detectColoniesInRegion(img, region, effectiveParams),
       };
-      const colonies = e.colonies.map(c => ({ ...c, cx: c.cx + dx, cy: c.cy + dy }));
-      return { ...e, region, colonies };
     }));
-  }, []);
+  }, [getLearnedParams, mode, params]);
+
+  // ── Move a region (drag-reposition) ────────────────────────────────────
+  const handleMoveRegion = useCallback((regionId: string, dx: number, dy: number) => {
+    transformRegionEntry(regionId, region => ({
+      ...region,
+      cx: region.cx + dx,
+      cy: region.cy + dy,
+      polygon: region.polygon?.map(p => ({ x: p.x + dx, y: p.y + dy })),
+    }));
+  }, [transformRegionEntry]);
+
+  const handleResizeRegion = useCallback((regionId: string, radius: number) => {
+    transformRegionEntry(regionId, region => (
+      region.kind === 'sphere'
+        ? { ...region, radius: Math.max(12, Math.min(500, radius)) }
+        : region
+    ));
+  }, [transformRegionEntry]);
 
   // ── Review-mode toggle for detected colonies ───────────────────────────
   const handleToggleColony = useCallback((colonyId: string) => {
@@ -472,6 +503,7 @@ export default function App() {
   const handleCaptureSample = useCallback((kind: SampleToolKind, cx: number, cy: number) => {
     if (!imgElRef.current) return;
     const sample = captureColorSample(imgElRef.current, cx, cy, SAMPLE_RADIUS);
+    clearAppliedCalibration();
     if (kind === 'sampleAgar') {
       setAgarSample(sample);
       setStep('sample_colony');
@@ -482,10 +514,25 @@ export default function App() {
     setStep('review_regions');
     setSelectionKind('sphere');
     setMode('select');
-  }, []);
+  }, [clearAppliedCalibration]);
+
+  const handleDeleteSample = useCallback((kind: SampleToolKind) => {
+    clearAppliedCalibration();
+    if (kind === 'sampleAgar') {
+      setAgarSample(null);
+      setStep('sample_agar');
+      setSelectionKind('sampleAgar');
+      setMode('select');
+      return;
+    }
+    setColonySample(null);
+    setStep('sample_colony');
+    setSelectionKind('sampleColony');
+    setMode('select');
+  }, [clearAppliedCalibration]);
 
   const handleCountColonies = useCallback(() => {
-    const calibration = pendingCalibration ?? params.calibration;
+    const calibration = pendingCalibration;
     if (!calibration || entries.length === 0) return;
     const nextParams: DetectionParams = {
       ...params,
@@ -538,7 +585,7 @@ export default function App() {
   const allColonies     = entries.flatMap(e => e.colonies);
   const allRegions      = entries.map(e => e.region);
   const activeColonies  = allColonies.filter(c => c.status !== 'rejected');
-  const canCountColonies = step === 'review_regions' && entries.length > 0 && !!(pendingCalibration ?? params.calibration);
+  const canCountColonies = step === 'review_regions' && entries.length > 0 && !!pendingCalibration;
   const stepMessage = step === 'sample_agar'
     ? 'Step 1 of 3: click a clean agar-only patch to calibrate the background.'
     : step === 'sample_colony'
@@ -632,8 +679,10 @@ export default function App() {
                 onAddGrid={handleAddGrid}
                 onDeleteRegion={handleDeleteRegion}
                 onMoveRegion={handleMoveRegion}
+                onResizeRegion={handleResizeRegion}
                 calibrationSamples={{ agar: agarSample, colony: colonySample }}
                 onCaptureSample={handleCaptureSample}
+                onDeleteSample={handleDeleteSample}
               />
             </div>
 

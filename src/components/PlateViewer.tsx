@@ -34,11 +34,13 @@ interface Props {
   onAddGrid: (rect: GridRect, params: GridParams) => void;
   onDeleteRegion?: (id: string) => void;
   onMoveRegion?: (regionId: string, dx: number, dy: number) => void;
+  onResizeRegion?: (regionId: string, radius: number) => void;
   calibrationSamples?: {
     agar: ColorSample | null;
     colony: ColorSample | null;
   };
   onCaptureSample?: (kind: 'sampleAgar' | 'sampleColony', cx: number, cy: number) => void;
+  onDeleteSample?: (kind: 'sampleAgar' | 'sampleColony') => void;
 }
 
 const CLICK_TOL = 8;
@@ -99,6 +101,15 @@ function pointNearRegionEdge(x: number, y: number, reg: SelectionRegion, tol: nu
   return false;
 }
 
+function sphereRegionEdgeUnderPoint(x: number, y: number, regions: SelectionRegion[], tol: number): SelectionRegion | null {
+  for (let i = regions.length - 1; i >= 0; i--) {
+    const reg = regions[i];
+    if (reg.kind !== 'sphere') continue;
+    if (pointNearRegionEdge(x, y, reg, tol)) return reg;
+  }
+  return null;
+}
+
 function isSampleTool(tool: SelectionTool): tool is 'sampleAgar' | 'sampleColony' {
   return tool === 'sampleAgar' || tool === 'sampleColony';
 }
@@ -108,7 +119,7 @@ export function PlateViewer({
   colonies, regions, mode, selectionKind, gridParams,
   onToggleColony, onAddManual, onDeleteColony, onMoveColony, onResizeColony,
   onAddSphere, onAddLasso, onAddGrid,
-  onDeleteRegion, onMoveRegion, calibrationSamples, onCaptureSample,
+  onDeleteRegion, onMoveRegion, onResizeRegion, calibrationSamples, onCaptureSample, onDeleteSample,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef    = useRef<HTMLCanvasElement>(null);
@@ -139,6 +150,12 @@ export function PlateViewer({
     originalCx: number; originalCy: number;
     cursorX: number; cursorY: number;
   } | null>(null);
+  const [resizingRegion, setResizingRegion] = useState<{
+    regionId: string;
+    cx: number;
+    cy: number;
+    radius: number;
+  } | null>(null);
   const [editingColony, setEditingColony] = useState<{
     colonyId: string;
     startX: number; startY: number;
@@ -146,6 +163,15 @@ export function PlateViewer({
     cx: number; cy: number;
   } | null>(null);
   const [hoverColonyId, setHoverColonyId] = useState<string | null>(null);
+  const [hoverRegionEdgeId, setHoverRegionEdgeId] = useState<string | null>(null);
+  const [editingSample, setEditingSample] = useState<{
+    kind: 'sampleAgar' | 'sampleColony';
+    startX: number; startY: number;
+    originCx: number; originCy: number;
+    radius: number;
+    cx: number; cy: number;
+  } | null>(null);
+  const [hoverSampleKind, setHoverSampleKind] = useState<'sampleAgar' | 'sampleColony' | null>(null);
 
   // Hover state — for cursor hint
   const [hoverMove, setHoverMove] = useState(false);
@@ -185,12 +211,40 @@ export function PlateViewer({
     };
   }
 
-  function colonyUnderPoint(x: number, y: number): Colony | null {
+  function colonyUnderPoint(
+    x: number,
+    y: number,
+    options?: { includeRejected?: boolean; generous?: boolean }
+  ): Colony | null {
+    const includeRejected = options?.includeRejected ?? false;
+    const generous = options?.generous ?? false;
     for (let i = colonies.length - 1; i >= 0; i--) {
       const colony = colonies[i];
-      if (colony.status === 'rejected') continue;
-      const r = Math.max(colony.radius, 3) + CLICK_TOL / zoom;
+      if (!includeRejected && colony.status === 'rejected') continue;
+      const baseRadius = colony.status === 'rejected'
+        ? Math.max(colony.radius, 7)
+        : Math.max(colony.radius, 3);
+      const padding = generous ? 16 / zoom : CLICK_TOL / zoom;
+      const r = baseRadius + padding;
       if ((colony.cx - x) ** 2 + (colony.cy - y) ** 2 <= r * r) return colony;
+    }
+    return null;
+  }
+
+  function sampleUnderPoint(
+    x: number,
+    y: number
+  ): { kind: 'sampleAgar' | 'sampleColony'; sample: ColorSample } | null {
+    const samples = [
+      { kind: 'sampleColony' as const, sample: calibrationSamples?.colony },
+      { kind: 'sampleAgar' as const, sample: calibrationSamples?.agar },
+    ];
+    for (const item of samples) {
+      if (!item.sample) continue;
+      const r = item.sample.radius + CLICK_TOL / zoom;
+      if ((item.sample.cx - x) ** 2 + (item.sample.cy - y) ** 2 <= r * r) {
+        return { kind: item.kind, sample: item.sample };
+      }
     }
     return null;
   }
@@ -213,6 +267,7 @@ export function PlateViewer({
     const mdx = carrying ? carrying.cursorX - carrying.originalCx : 0;
     const mdy = carrying ? carrying.cursorY - carrying.originalCy : 0;
     const draggedColonyId = editingColony?.colonyId;
+    const resizingId = resizingRegion?.regionId;
 
     // ── Draw saved regions ───────────────────────────────────────────────
     regions.forEach((reg, idx) => {
@@ -220,6 +275,7 @@ export function PlateViewer({
       const offset = reg.id === moveId;
       const ox = offset ? mdx : 0;
       const oy = offset ? mdy : 0;
+      const drawRadius = reg.id === resizingId ? (resizingRegion?.radius ?? reg.radius) : reg.radius;
 
       ctx.save();
       ctx.setLineDash([8 / zoom, 5 / zoom]);
@@ -241,13 +297,13 @@ export function PlateViewer({
         ctx.globalAlpha = 1;
       } else {
         ctx.beginPath();
-        ctx.arc(reg.cx + ox, reg.cy + oy, reg.radius, 0, Math.PI * 2);
+        ctx.arc(reg.cx + ox, reg.cy + oy, drawRadius, 0, Math.PI * 2);
         ctx.stroke();
 
         ctx.globalAlpha = 0.06;
         ctx.fillStyle   = color;
         ctx.beginPath();
-        ctx.arc(reg.cx + ox, reg.cy + oy, reg.radius, 0, Math.PI * 2);
+        ctx.arc(reg.cx + ox, reg.cy + oy, drawRadius, 0, Math.PI * 2);
         ctx.fill();
         ctx.globalAlpha = 1;
       }
@@ -256,31 +312,45 @@ export function PlateViewer({
       ctx.font      = `${Math.max(11, 14 / zoom)}px ui-sans-serif, sans-serif`;
       ctx.fillStyle = color;
       ctx.textAlign = 'center';
-      const labelY = reg.cy + oy - reg.radius - 6 / zoom;
+      const labelY = reg.cy + oy - drawRadius - 6 / zoom;
       ctx.fillText(reg.label, reg.cx + ox, labelY);
       ctx.restore();
     });
 
     const samples = [
-      { sample: calibrationSamples?.agar, color: '#f59e0b', label: 'Agar' },
-      { sample: calibrationSamples?.colony, color: '#d946ef', label: 'Colony' },
+      {
+        kind: 'sampleAgar' as const,
+        sample: calibrationSamples?.agar,
+        color: '#f59e0b',
+        label: 'Agar',
+      },
+      {
+        kind: 'sampleColony' as const,
+        sample: calibrationSamples?.colony,
+        color: '#d946ef',
+        label: 'Colony',
+      },
     ];
     for (const item of samples) {
       if (!item.sample) continue;
+      const preview = editingSample?.kind === item.kind ? editingSample : null;
+      const drawCx = preview?.cx ?? item.sample.cx;
+      const drawCy = preview?.cy ?? item.sample.cy;
+      const drawRadius = preview?.radius ?? item.sample.radius;
       ctx.save();
       ctx.setLineDash([5 / zoom, 3 / zoom]);
       ctx.strokeStyle = item.color;
       ctx.lineWidth = 2 / zoom;
       ctx.fillStyle = `${item.color}22`;
       ctx.beginPath();
-      ctx.arc(item.sample.cx, item.sample.cy, item.sample.radius, 0, Math.PI * 2);
+      ctx.arc(drawCx, drawCy, drawRadius, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.font = `${Math.max(11, 13 / zoom)}px ui-sans-serif, sans-serif`;
       ctx.textAlign = 'center';
       ctx.fillStyle = item.color;
-      ctx.fillText(item.label, item.sample.cx, item.sample.cy - item.sample.radius - 6 / zoom);
+      ctx.fillText(item.label, drawCx, drawCy - drawRadius - 6 / zoom);
       ctx.restore();
     }
 
@@ -384,12 +454,19 @@ export function PlateViewer({
       const offset = c.regionId === moveId;
       const ox = offset ? mdx : 0;
       const oy = offset ? mdy : 0;
+      const drawCx = c.cx + ox;
+      const drawCy = c.cy + oy;
+
+      ctx.beginPath();
+      ctx.arc(drawCx, drawCy, Math.max(c.radius, 7) + 10 / zoom, 0, Math.PI * 2);
+      ctx.fillStyle = hoverColonyId === c.id ? 'rgba(248,113,113,0.18)' : 'rgba(248,113,113,0.10)';
+      ctx.fill();
 
       ctx.strokeStyle = '#f87171';
-      ctx.lineWidth   = 1.5 / zoom;
+      ctx.lineWidth   = (hoverColonyId === c.id ? 2.5 : 1.5) / zoom;
       ctx.beginPath();
-      ctx.moveTo(c.cx + ox - s, c.cy + oy - s); ctx.lineTo(c.cx + ox + s, c.cy + oy + s);
-      ctx.moveTo(c.cx + ox + s, c.cy + oy - s); ctx.lineTo(c.cx + ox - s, c.cy + oy + s);
+      ctx.moveTo(drawCx - s, drawCy - s); ctx.lineTo(drawCx + s, drawCy + s);
+      ctx.moveTo(drawCx + s, drawCy - s); ctx.lineTo(drawCx - s, drawCy + s);
       ctx.stroke();
     }
 
@@ -415,17 +492,19 @@ export function PlateViewer({
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!carrying) return undefined;
+    if (!carrying && !editingSample && !resizingRegion) return undefined;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault();
         justPickedUp.current = false;
         setCarrying(null);
+        setEditingSample(null);
+        setResizingRegion(null);
       }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [carrying]);
+  }, [carrying, editingSample, resizingRegion]);
 
   // ── Zoom / radius-resize ───────────────────────────────────────────────
   function onWheel(e: WheelEvent<HTMLDivElement>) {
@@ -484,14 +563,43 @@ export function PlateViewer({
     if (e.button !== 0) return;
     didDrag.current = false;
 
-    if (mode === 'select') {
+    if (mode === 'select' || mode === 'review') {
       if (carrying) return;
       const { x, y } = screenToImage(e.clientX, e.clientY);
       const tol = 12 / zoom;
-      const sampleToolActive = isSampleTool(selectionKind);
+      const sampleToolActive = mode === 'select' && isSampleTool(selectionKind);
+      const hitSample = mode === 'select' && onCaptureSample ? sampleUnderPoint(x, y) : null;
+      const hitEdge = sphereRegionEdgeUnderPoint(x, y, regions, tol);
+      const hitColony = mode === 'review'
+        ? colonyUnderPoint(x, y, { includeRejected: true, generous: true })
+        : null;
+
+      if (hitSample) {
+        setEditingSample({
+          kind: hitSample.kind,
+          startX: x,
+          startY: y,
+          originCx: hitSample.sample.cx,
+          originCy: hitSample.sample.cy,
+          radius: hitSample.sample.radius,
+          cx: hitSample.sample.cx,
+          cy: hitSample.sample.cy,
+        });
+        return;
+      }
+
+      if (hitEdge && onResizeRegion) {
+        setResizingRegion({
+          regionId: hitEdge.id,
+          cx: hitEdge.cx,
+          cy: hitEdge.cy,
+          radius: hitEdge.radius,
+        });
+        return;
+      }
 
       // Click inside an existing region (not on its edge) to pick it up.
-      const hitRegion = !sampleToolActive ? regionUnderPoint(x, y, tol) : null;
+      const hitRegion = !sampleToolActive && !hitColony ? regionUnderPoint(x, y, tol) : null;
       if (hitRegion && onMoveRegion) {
         justPickedUp.current = true;
         setCarrying({
@@ -501,6 +609,12 @@ export function PlateViewer({
           cursorX: x,
           cursorY: y,
         });
+        return;
+      }
+
+      if (mode === 'review') {
+        setIsPanning(true);
+        panStart.current = { mx: e.clientX, my: e.clientY, px: pan.x, py: pan.y };
         return;
       }
 
@@ -552,6 +666,31 @@ export function PlateViewer({
       return;
     }
 
+    if (editingSample) {
+      const nextCx = Math.max(
+        0,
+        Math.min(imageWidth, editingSample.originCx + (ix - editingSample.startX))
+      );
+      const nextCy = Math.max(
+        0,
+        Math.min(imageHeight, editingSample.originCy + (iy - editingSample.startY))
+      );
+      if (Math.abs(ix - editingSample.startX) + Math.abs(iy - editingSample.startY) > 2) {
+        didDrag.current = true;
+      }
+      setEditingSample({ ...editingSample, cx: nextCx, cy: nextCy });
+      return;
+    }
+
+    if (resizingRegion) {
+      const nextRadius = Math.max(12, Math.hypot(ix - resizingRegion.cx, iy - resizingRegion.cy));
+      if (Math.abs(nextRadius - resizingRegion.radius) > 1) {
+        didDrag.current = true;
+      }
+      setResizingRegion({ ...resizingRegion, radius: nextRadius });
+      return;
+    }
+
     if (carrying) {
       setCarrying({ ...carrying, cursorX: ix, cursorY: iy });
       return;
@@ -584,23 +723,32 @@ export function PlateViewer({
     }
 
     // Cursor hint: is hover inside a movable region?
-    if (
-      mode === 'select'
-      && !isSampleTool(selectionKind)
-      && !isPanning
-      && !drawStart.current
-      && !lassoActive.current
-      && !gridStart.current
-    ) {
-      const tol = 12 / zoom;
-      const hit = regionUnderPoint(ix, iy, tol);
-      setHoverMove(!!hit);
-    } else if (hoverMove) {
-      setHoverMove(false);
+    if ((mode === 'select' || mode === 'review') && !isPanning && !drawStart.current && !lassoActive.current && !gridStart.current) {
+      const hitSample = sampleUnderPoint(ix, iy);
+      setHoverSampleKind(mode === 'select' ? (hitSample?.kind ?? null) : null);
+      const hitEdge = sphereRegionEdgeUnderPoint(ix, iy, regions, 12 / zoom);
+      setHoverRegionEdgeId(hitEdge?.id ?? null);
+
+      if (mode === 'review' || !isSampleTool(selectionKind)) {
+        const tol = 12 / zoom;
+        const hit = regionUnderPoint(ix, iy, tol);
+        const colonyHit = mode === 'review'
+          ? colonyUnderPoint(ix, iy, { includeRejected: true, generous: true })
+          : null;
+        setHoverMove(!hitSample && !hitEdge && !colonyHit && !!hit);
+      } else if (hoverMove) {
+        setHoverMove(false);
+      }
+    } else {
+      if (hoverMove) setHoverMove(false);
+      if (hoverSampleKind) setHoverSampleKind(null);
+      if (hoverRegionEdgeId) setHoverRegionEdgeId(null);
     }
 
-    if (mode === 'add' && !isPanning) {
-      const hit = colonyUnderPoint(ix, iy);
+    if ((mode === 'add' || mode === 'review') && !isPanning) {
+      const hit = mode === 'review'
+        ? colonyUnderPoint(ix, iy, { includeRejected: true, generous: true })
+        : colonyUnderPoint(ix, iy);
       setHoverColonyId(hit?.id ?? null);
     } else if (hoverColonyId) {
       setHoverColonyId(null);
@@ -621,6 +769,22 @@ export function PlateViewer({
         onDeleteColony?.(editingColony.colonyId);
       }
       setEditingColony(null);
+      return;
+    }
+
+    if (editingSample) {
+      if (didDrag.current) {
+        onCaptureSample?.(editingSample.kind, editingSample.cx, editingSample.cy);
+      }
+      setEditingSample(null);
+      return;
+    }
+
+    if (resizingRegion) {
+      if (didDrag.current) {
+        onResizeRegion?.(resizingRegion.regionId, resizingRegion.radius);
+      }
+      setResizingRegion(null);
       return;
     }
 
@@ -673,7 +837,9 @@ export function PlateViewer({
 
     const { x: ix, y: iy } = screenToImage(e.clientX, e.clientY);
 
-    const hit = colonyUnderPoint(ix, iy);
+    const hit = mode === 'review'
+      ? colonyUnderPoint(ix, iy, { includeRejected: true, generous: true })
+      : colonyUnderPoint(ix, iy);
 
     if (hit && mode === 'review') {
       onToggleColony(hit.id);
@@ -700,13 +866,23 @@ export function PlateViewer({
 
   const cursorStyle = (() => {
     if (carrying) return 'grabbing';
+    if (resizingRegion) return 'grabbing';
     if (editingColony) return 'grabbing';
+    if (editingSample) return 'grabbing';
     if (mode === 'select') {
       if (drawStart.current || lassoActive.current || gridStart.current) return 'crosshair';
+      if (hoverRegionEdgeId) return 'grab';
+      if (hoverSampleKind) return 'grab';
       if (isSampleTool(selectionKind)) return 'crosshair';
       if (hoverMove) return 'grab';
       if (selectionKind === 'grid') return 'crosshair';
       return 'cell';
+    }
+    if (mode === 'review') {
+      if (hoverColonyId) return 'pointer';
+      if (hoverRegionEdgeId) return 'grab';
+      if (hoverMove) return 'grab';
+      return 'default';
     }
     if (isPanning) return 'grabbing';
     if (mode === 'add') return hoverColonyId ? 'grab' : 'crosshair';
@@ -749,18 +925,18 @@ export function PlateViewer({
       <div className="px-3 py-1.5 bg-slate-900/60 border-b border-slate-800 shrink-0">
         <p className="text-xs text-slate-500">
           {mode === 'select' && selectionKind === 'sphere'
-            ? 'Drag to draw · Scroll while drawing to resize · Click inside a region to pick it up · Click again to drop · Edge-click deletes.'
+            ? 'Drag to draw · Scroll while drawing to resize · Click inside a region to pick it up · Click again to drop · Drag a region edge to resize · Drag color samples to adjust them.'
             : mode === 'select' && selectionKind === 'lasso'
-            ? 'Drag to freehand-draw · Click inside a region to pick it up · Click again to drop · Edge-click deletes.'
+            ? 'Drag to freehand-draw · Click inside a region to pick it up · Click again to drop · Edge-click deletes · Drag color samples to adjust them.'
             : mode === 'select' && selectionKind === 'grid'
             ? `Drag to drop a ${gridParams.rows}×${gridParams.cols} dilution grid. Adjust rows/cols/size in the sidebar.`
             : mode === 'select' && selectionKind === 'sampleAgar'
-            ? 'Click agar to capture a background color sample. Edge-click still deletes a region. Right-click or Escape cancels carrying.'
+            ? 'Click agar to capture a background color sample. Drag the marker to fine-tune it. Edge-click still deletes a region. Right-click or Escape cancels carrying.'
             : mode === 'select' && selectionKind === 'sampleColony'
-            ? 'Click a representative colony to capture a color sample. Edge-click still deletes a region. Right-click or Escape cancels carrying.'
+            ? 'Click a representative colony to capture a color sample. Drag the marker to fine-tune it. Edge-click still deletes a region. Right-click or Escape cancels carrying.'
             : mode === 'add'
             ? 'Click empty space inside a region to add a colony. Click a colony to remove it, drag it to move it, and scroll over it to resize.'
-            : 'Click a colony to cycle: auto → confirmed → rejected. Switch to Add mode to place manually.'}
+            : 'Click a colony or red X to cycle: auto → confirmed → rejected. Drag inside a region to move it, or drag its edge to resize it.'}
           {' '}Scroll to zoom · Drag empty space to pan.
         </p>
       </div>
@@ -775,10 +951,12 @@ export function PlateViewer({
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
         onContextMenu={e => {
-          if (carrying) {
+          if (carrying || editingSample || resizingRegion) {
             e.preventDefault();
             justPickedUp.current = false;
             setCarrying(null);
+            setEditingSample(null);
+            setResizingRegion(null);
           }
         }}
         onMouseLeave={() => {
@@ -789,6 +967,20 @@ export function PlateViewer({
               onMoveColony?.(editingColony.colonyId, editingColony.cx, editingColony.cy);
             }
             setEditingColony(null);
+          }
+
+          if (editingSample) {
+            if (didDrag.current) {
+              onCaptureSample?.(editingSample.kind, editingSample.cx, editingSample.cy);
+            }
+            setEditingSample(null);
+          }
+
+          if (resizingRegion) {
+            if (didDrag.current) {
+              onResizeRegion?.(resizingRegion.regionId, resizingRegion.radius);
+            }
+            setResizingRegion(null);
           }
 
           if (mode === 'select' && selectionKind === 'sphere'
@@ -811,8 +1003,12 @@ export function PlateViewer({
           gridStart.current = null;
           setGridRect(null);
           setEditingColony(null);
+          setEditingSample(null);
+          setResizingRegion(null);
           setHoverMove(false);
           setHoverColonyId(null);
+          setHoverSampleKind(null);
+          setHoverRegionEdgeId(null);
         }}
       >
         <canvas ref={canvasRef} className="absolute inset-0" />
@@ -837,6 +1033,44 @@ export function PlateViewer({
               className="absolute flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-red-400/70 bg-slate-950/90 text-sm font-bold text-red-300 shadow"
               style={{ left: anchor.x, top: anchor.y }}
               title="Delete region"
+            >
+              ×
+            </button>
+          );
+        })}
+
+        {mode === 'select' && onDeleteSample && [
+          {
+            kind: 'sampleAgar' as const,
+            sample: calibrationSamples?.agar,
+            className: 'border-amber-400/70 text-amber-300',
+            title: 'Delete agar sample',
+          },
+          {
+            kind: 'sampleColony' as const,
+            sample: calibrationSamples?.colony,
+            className: 'border-fuchsia-400/70 text-fuchsia-300',
+            title: 'Delete colony sample',
+          },
+        ].map(item => {
+          if (!item.sample) return null;
+          const preview = editingSample?.kind === item.kind ? editingSample : null;
+          const anchor = imageToScreen(
+            (preview?.cx ?? item.sample.cx) + item.sample.radius,
+            (preview?.cy ?? item.sample.cy) - item.sample.radius
+          );
+          return (
+            <button
+              key={`delete-sample-${item.kind}`}
+              type="button"
+              onMouseDown={e => e.stopPropagation()}
+              onClick={e => {
+                e.stopPropagation();
+                onDeleteSample(item.kind);
+              }}
+              className={`absolute flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border bg-slate-950/90 text-xs font-bold shadow ${item.className}`}
+              style={{ left: anchor.x, top: anchor.y }}
+              title={item.title}
             >
               ×
             </button>
