@@ -74,6 +74,8 @@ export default function Page() {
   const [mode, setMode] = useState<Mode>("idle");
   const [placement, setPlacement] = useState<PlacementCircle | null>(null);
   const [sensitivity, setSensitivity] = useState(1.0);
+  const [splitTouching, setSplitTouching] = useState(true);
+  const [minSpacing, setMinSpacing] = useState(14);
 
   // Dilution prompt state (modal-ish)
   const [pendingRegion, setPendingRegion] = useState<SelectionRegion | null>(null);
@@ -104,8 +106,10 @@ export default function Page() {
       invertImage,
       calibration,
       sensitivity,
+      watershed: splitTouching,
+      watershedMinSeparation: minSpacing,
     }),
-    [invertImage, calibration, sensitivity],
+    [invertImage, calibration, sensitivity, splitTouching, minSpacing],
   );
 
   const defaultPlacementRadius = useMemo(() => {
@@ -656,6 +660,40 @@ export default function Page() {
                   <span>more colonies</span>
                   <span>fewer colonies</span>
                 </div>
+
+                <label className="mt-3 flex items-center gap-2 text-xs text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={splitTouching}
+                    onChange={(e) => setSplitTouching(e.target.checked)}
+                  />
+                  Split touching colonies
+                </label>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  Turn off if a single colony is being circled multiple times. Leave on if adjacent colonies are being merged.
+                </p>
+
+                {splitTouching && (
+                  <>
+                    <label className="mt-2 block text-xs text-gray-400">
+                      Min. spacing between colonies
+                      <span className="ml-2 text-gray-500 tabular-nums">{minSpacing}px</span>
+                    </label>
+                    <input
+                      type="range"
+                      min={4}
+                      max={40}
+                      step={1}
+                      value={minSpacing}
+                      onChange={(e) => setMinSpacing(parseInt(e.target.value, 10))}
+                      className="w-full"
+                    />
+                    <div className="flex justify-between text-[10px] text-gray-500">
+                      <span>split more aggressively</span>
+                      <span>keep as one</span>
+                    </div>
+                  </>
+                )}
 
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <button

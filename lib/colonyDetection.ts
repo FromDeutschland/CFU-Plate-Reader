@@ -218,23 +218,44 @@ function distanceTransform(binary: Uint8Array, w: number, h: number): Float32Arr
 
 function watershedSplit(binary: Uint8Array, w: number, h: number, minSep: number): Uint8Array {
   const dist = distanceTransform(binary, w, h);
-  const seeds: { i: number; d: number }[] = [];
   const r = Math.max(2, Math.round(minSep));
+  const minPeakHeight = Math.max(3, r * 0.5);
+
+  // Pass 1: find candidate local maxima. Require strict > for neighbors within r.
+  const candidates: { i: number; d: number }[] = [];
   for (let y = r; y < h - r; y++) for (let x = r; x < w - r; x++) {
     const i = y * w + x, v = dist[i];
-    if (v < 3) continue;
+    if (v < minPeakHeight) continue;
     let peak = true;
     for (let dy = -r; dy <= r && peak; dy++) for (let dx = -r; dx <= r && peak; dx++) {
       if (dx === 0 && dy === 0) continue;
       if (dist[(y + dy) * w + (x + dx)] > v) peak = false;
     }
-    if (peak) seeds.push({ i, d: v });
+    if (peak) candidates.push({ i, d: v });
   }
-  if (seeds.length <= 1) return binary.slice();
+  if (candidates.length <= 1) return binary.slice();
+
+  // Pass 2: non-maximum suppression — greedily pick the strongest peaks that
+  // are at least 2*minSep apart. Collapses minor ripples on a single colony's
+  // distance transform into one seed.
+  candidates.sort((a, b) => b.d - a.d);
+  const nms: { i: number; d: number; x: number; y: number }[] = [];
+  const nmsRadius = 2 * r;
+  const nmsRadiusSq = nmsRadius * nmsRadius;
+  outer: for (const c of candidates) {
+    const cx = c.i % w, cy = (c.i / w) | 0;
+    for (const kept of nms) {
+      const dx = cx - kept.x, dy = cy - kept.y;
+      if (dx * dx + dy * dy < nmsRadiusSq) continue outer;
+    }
+    nms.push({ i: c.i, d: c.d, x: cx, y: cy });
+  }
+  if (nms.length <= 1) return binary.slice();
+
+  // Pass 3: BFS-label each foreground pixel from the nearest surviving seed.
   const labels = new Int32Array(binary.length).fill(-1);
-  seeds.sort((a, b) => b.d - a.d);
   const queue: number[] = [];
-  for (let k = 0; k < seeds.length; k++) { labels[seeds[k].i] = k; queue.push(seeds[k].i); }
+  for (let k = 0; k < nms.length; k++) { labels[nms[k].i] = k; queue.push(nms[k].i); }
   let qi = 0;
   while (qi < queue.length) {
     const c = queue[qi++];
@@ -248,6 +269,8 @@ function watershedSplit(binary: Uint8Array, w: number, h: number, minSep: number
       if (labels[n] === -1) { labels[n] = labels[c]; queue.push(n); }
     }
   }
+
+  // Pass 4: cut ridges between different labels.
   const out = binary.slice();
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const i = y * w + x;
@@ -366,9 +389,7 @@ export function detectColonies(imageData: ImageData, params: DetectionParams, re
   }
 
   if (params.watershed) {
-    const expR = Math.sqrt(Math.max(params.minArea, 10) * Math.max(params.maxArea, 100)) / Math.PI ** 0.5 / 2;
-    const sep = Math.max(3, Math.min(12, Math.round(expR * 0.6)));
-    binary = watershedSplit(binary, w, h, sep);
+    binary = watershedSplit(binary, w, h, params.watershedMinSeparation);
   }
 
   const comps = findComponents(binary, w, h, blurred);

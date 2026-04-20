@@ -44,6 +44,8 @@ export interface DetectionParams {
   minEdgeSharpness: number;
   textureCheck: boolean;
   watershed: boolean;
+  /** Minimum pixel spacing between two separate colony centers (for watershed). */
+  watershedMinSeparation: number;
   invertImage: boolean;
   chromaNormalize: boolean;
   calibration: Calibration | null;
@@ -94,6 +96,7 @@ export const defaultDetectionParams: DetectionParams = {
   minEdgeSharpness: 0.04,
   textureCheck: true,
   watershed: true,
+  watershedMinSeparation: 14,
   invertImage: false,
   chromaNormalize: true,
   calibration: null,
