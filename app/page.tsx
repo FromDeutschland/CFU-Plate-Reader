@@ -461,6 +461,8 @@ export default function Page() {
           {placement && (mode === "place-agar" || mode === "place-colony" || mode === "place-region") && !pendingRegion && (
             <PlacementControls
               placement={placement}
+              minRadius={mode === "place-region" ? 10 : 1}
+              maxRadius={mode === "place-region" ? 1500 : 250}
               onChange={handlePlacementMove}
               onConfirm={() => {
                 if (mode === "place-region") {
@@ -865,32 +867,37 @@ function btnClass(active: boolean, tone: "cyan" | "purple" | "amber" | "green") 
 
 function PlacementControls({
   placement,
+  minRadius,
+  maxRadius,
   onChange,
   onConfirm,
   onCancel,
   homogeneity,
 }: {
   placement: PlacementCircle;
+  minRadius: number;
+  maxRadius: number;
   onChange: (p: PlacementCircle) => void;
   onConfirm: () => void;
   onCancel: () => void;
   homogeneity?: number;
 }) {
+  const clamped = Math.min(maxRadius, Math.max(minRadius, placement.radius));
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-3 rounded-full border border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-panel)] px-4 py-2 shadow">
       <label className="text-xs text-gray-300 flex items-center gap-2">
         Radius
         <input
           type="range"
-          min={10}
-          max={1500}
+          min={minRadius}
+          max={maxRadius}
           step={1}
-          value={placement.radius}
+          value={clamped}
           onChange={(e) => onChange({ ...placement, radius: parseFloat(e.target.value) })}
           className="w-40"
         />
         <span className="tabular-nums text-gray-400 w-10 text-right">
-          {placement.radius.toFixed(0)}px
+          {clamped.toFixed(0)}px
         </span>
       </label>
       {homogeneity != null && (
