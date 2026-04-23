@@ -87,6 +87,24 @@ export interface HistoryRow {
   timestamp: number;
 }
 
+export interface Exemplar {
+  features: {
+    area: number;
+    circularity: number;
+    brightness: number;
+    edgeSharpness: number;
+    lbpVariance: number;
+  };
+  label: 1 | 0;
+  timestamp: number;
+}
+
+export interface LearnedModel {
+  weights: number[];
+  trainedAt: number;
+  n: number;
+}
+
 export const defaultDetectionParams: DetectionParams = {
   blurRadius: 2,
   threshold: 0,

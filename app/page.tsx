@@ -13,6 +13,9 @@ import {
   Save,
   Trash,
   Play,
+  RectangleHorizontal,
+  Undo2,
+  Redo2,
 } from "lucide-react";
 import {
   ImageCanvas,
@@ -36,8 +39,23 @@ import {
   type Colony,
   type DetectionParams,
   type HistoryRow,
+  type LearnedModel,
   type SelectionRegion,
 } from "@/lib/types";
+import {
+  loadExemplars,
+  saveExemplar,
+  loadModel,
+  trainModel,
+  applyLearnedModel,
+  clearLearningData,
+  MIN_TRAIN,
+} from "@/lib/learning";
+import {
+  CALIBRATION_PRESETS,
+  saveLastCalibration,
+  loadLastCalibration,
+} from "@/lib/calibrationPresets";
 
 type Mode = CanvasMode | "idle";
 
@@ -47,6 +65,15 @@ function uid(prefix: string) {
 
 function basename(n: string) {
   return n.replace(/\.[^/.]+$/, "");
+}
+
+interface AppSnapshot {
+  colonies: Colony[];
+  manualColonyIds: string[];
+  removedColonyIds: string[];
+  regions: SelectionRegion[];
+  addedByRegion: Record<string, number>;
+  removedByRegion: Record<string, number>;
 }
 
 export default function Page() {
@@ -77,6 +104,17 @@ export default function Page() {
   const [splitTouching, setSplitTouching] = useState(true);
   const [minSpacing, setMinSpacing] = useState(14);
 
+  // Learning
+  const [learnedModel, setLearnedModel] = useState<LearnedModel | null>(null);
+  const [exemplarCount, setExemplarCount] = useState(0);
+
+  // Calibration presets
+  const [usingSavedCalibration, setUsingSavedCalibration] = useState(false);
+
+  // Undo/redo
+  const undoStackRef = useRef<AppSnapshot[]>([]);
+  const redoStackRef = useRef<AppSnapshot[]>([]);
+
   // Dilution prompt state (modal-ish)
   const [pendingRegion, setPendingRegion] = useState<SelectionRegion | null>(null);
   const [pendingLabel, setPendingLabel] = useState("");
@@ -94,6 +132,19 @@ export default function Page() {
   useEffect(() => {
     saveHistory(history);
   }, [history]);
+
+  // Load learned model and exemplar count on mount
+  useEffect(() => {
+    setLearnedModel(loadModel());
+    setExemplarCount(loadExemplars().length);
+  }, []);
+
+  // Auto-save calibration when both samples are set
+  useEffect(() => {
+    if (agarSample && colonySample) {
+      saveLastCalibration({ agarSample, colonySample, invertImage });
+    }
+  }, [agarSample, colonySample, invertImage]);
 
   const calibration: Calibration | null = useMemo(() => {
     if (!agarSample || !colonySample) return null;
@@ -117,6 +168,78 @@ export default function Page() {
     return Math.min(image.naturalWidth, image.naturalHeight) * 0.08;
   }, [image]);
 
+  // Feature 1: Dynamic max region radius
+  const maxRegionRadius = useMemo(() => {
+    if (!image) return 4000;
+    return Math.round(Math.max(image.naturalWidth, image.naturalHeight) * 0.85);
+  }, [image]);
+
+  // Feature 5: Undo/redo helpers
+  const pushUndo = useCallback(() => {
+    undoStackRef.current = [
+      ...undoStackRef.current.slice(-49),
+      {
+        colonies,
+        manualColonyIds: [...manualColonyIds],
+        removedColonyIds: [...removedColonyIds],
+        regions,
+        addedByRegion,
+        removedByRegion,
+      },
+    ];
+    redoStackRef.current = [];
+  }, [colonies, manualColonyIds, removedColonyIds, regions, addedByRegion, removedByRegion]);
+
+  function applySnapshot(snap: AppSnapshot) {
+    setColonies(snap.colonies);
+    setManualColonyIds(new Set(snap.manualColonyIds));
+    setRemovedColonyIds(new Set(snap.removedColonyIds));
+    setRegions(snap.regions);
+    setAddedByRegion(snap.addedByRegion);
+    setRemovedByRegion(snap.removedByRegion);
+  }
+
+  const handleUndo = useCallback(() => {
+    const snap = undoStackRef.current.pop();
+    if (!snap) return;
+    redoStackRef.current.push({
+      colonies,
+      manualColonyIds: [...manualColonyIds],
+      removedColonyIds: [...removedColonyIds],
+      regions,
+      addedByRegion,
+      removedByRegion,
+    });
+    applySnapshot(snap);
+  }, [colonies, manualColonyIds, removedColonyIds, regions, addedByRegion, removedByRegion]);
+
+  const handleRedo = useCallback(() => {
+    const snap = redoStackRef.current.pop();
+    if (!snap) return;
+    undoStackRef.current.push({
+      colonies,
+      manualColonyIds: [...manualColonyIds],
+      removedColonyIds: [...removedColonyIds],
+      regions,
+      addedByRegion,
+      removedByRegion,
+    });
+    applySnapshot(snap);
+  }, [colonies, manualColonyIds, removedColonyIds, regions, addedByRegion, removedByRegion]);
+
+  // Wire Cmd+Z / Cmd+Shift+Z
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === "z") {
+        e.preventDefault();
+        if (e.shiftKey) handleRedo();
+        else handleUndo();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [handleUndo, handleRedo]);
+
   // ── File upload ────────────────────────────────────────────────────────
 
   async function handleFile(file: File) {
@@ -127,7 +250,7 @@ export default function Page() {
       const img = await loadImageElement(src);
       setImage(img);
       setPlateName(basename(file.name));
-      // Reset per-image state but keep history + calibration
+      // Reset per-image state but keep history
       setRegions([]);
       setColonies([]);
       setManualColonyIds(new Set());
@@ -137,6 +260,18 @@ export default function Page() {
       setActiveRegionId(null);
       setMode("idle");
       setPlacement(null);
+      // Auto-restore last calibration
+      const saved = loadLastCalibration();
+      if (saved) {
+        setAgarSample(saved.calibration.agarSample);
+        setColonySample(saved.calibration.colonySample);
+        setInvertImage(saved.calibration.invertImage);
+        setUsingSavedCalibration(true);
+      } else {
+        setAgarSample(null);
+        setColonySample(null);
+        setUsingSavedCalibration(false);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -189,11 +324,13 @@ export default function Page() {
   function detectForRegion(region: SelectionRegion): Colony[] {
     if (!image) return [];
     const detected = detectColoniesInRegion(image, region, params);
-    return detected.map((c) => ({ ...c, regionId: region.id }));
+    const mapped = detected.map((c) => ({ ...c, regionId: region.id }));
+    return applyLearnedModel(mapped, learnedModel);
   }
 
   function handleConfirmRegion() {
     if (!pendingRegion || !image) return;
+    pushUndo();
     const region: SelectionRegion = {
       ...pendingRegion,
       label: pendingLabel.trim() || pendingRegion.label,
@@ -248,6 +385,7 @@ export default function Page() {
     if (!image || !activeRegionId) return;
     const region = regions.find((r) => r.id === activeRegionId);
     if (!region) return;
+    pushUndo();
     // Clear prior auto colonies for this region; keep manuals
     setColonies((prev) => {
       const kept = prev.filter(
@@ -267,6 +405,7 @@ export default function Page() {
 
   function handleDeleteActiveRegion() {
     if (!activeRegionId) return;
+    pushUndo();
     const id = activeRegionId;
     setRegions((prev) => prev.filter((r) => r.id !== id));
     setColonies((prev) => prev.filter((c) => c.regionId !== id));
@@ -296,6 +435,7 @@ export default function Page() {
       if (!region) return;
       // Reject clicks outside the active region
       if (Math.hypot(x - region.cx, y - region.cy) > region.radius) return;
+      pushUndo();
       const id = uid("col");
       const c: Colony = {
         id,
@@ -315,13 +455,14 @@ export default function Page() {
       setManualColonyIds((prev) => new Set(prev).add(id));
       setAddedByRegion((m) => ({ ...m, [activeRegionId]: (m[activeRegionId] ?? 0) + 1 }));
     },
-    [activeRegionId, regions],
+    [activeRegionId, regions, pushUndo],
   );
 
   const handleColonyToggle = useCallback(
     (id: string) => {
       const c = colonies.find((x) => x.id === id);
       if (!c) return;
+      pushUndo();
       // Manual → fully delete
       if (manualColonyIds.has(id)) {
         setColonies((prev) => prev.filter((x) => x.id !== id));
@@ -335,6 +476,21 @@ export default function Page() {
           [c.regionId]: Math.max(0, (m[c.regionId] ?? 0) - 1),
         }));
         return;
+      }
+      // Auto colony: capture exemplar
+      const isBeingRemoved = !removedColonyIds.has(id);
+      const features = {
+        area: c.area,
+        circularity: c.circularity,
+        brightness: c.brightness,
+        edgeSharpness: c.edgeSharpness,
+        lbpVariance: c.lbpVariance,
+      };
+      const exs = saveExemplar(features, isBeingRemoved ? 0 : 1);
+      setExemplarCount(exs.length);
+      if (exs.length >= MIN_TRAIN) {
+        const newModel = trainModel(exs);
+        setLearnedModel(newModel);
       }
       // Auto → toggle removal flag
       setRemovedColonyIds((prev) => {
@@ -351,8 +507,37 @@ export default function Page() {
         };
       });
     },
-    [colonies, manualColonyIds, removedColonyIds],
+    [colonies, manualColonyIds, removedColonyIds, pushUndo],
   );
+
+  const handleMassErase = useCallback((ids: string[]) => {
+    pushUndo();
+    const idSet = new Set(ids);
+    setColonies(prev => prev.filter(c => !idSet.has(c.id) || manualColonyIds.has(c.id)));
+    setRemovedColonyIds(prev => {
+      const n = new Set(prev);
+      for (const id of ids) n.add(id);
+      return n;
+    });
+    setRemovedByRegion(m => {
+      const counts: Record<string, number> = {};
+      for (const id of ids) {
+        const c = colonies.find(x => x.id === id);
+        if (!c || manualColonyIds.has(c.id)) continue;
+        counts[c.regionId] = (counts[c.regionId] ?? 0) + 1;
+      }
+      const next = { ...m };
+      for (const [regionId, cnt] of Object.entries(counts)) {
+        next[regionId] = (next[regionId] ?? 0) + cnt;
+      }
+      return next;
+    });
+  }, [colonies, manualColonyIds, pushUndo]);
+
+  const handleColonyDrag = useCallback((id: string, cx: number, cy: number) => {
+    setColonies(prev => prev.map(c => c.id === id ? { ...c, cx, cy, status: "manual" as const } : c));
+    setManualColonyIds(prev => new Set(prev).add(id));
+  }, []);
 
   // ── Counts for active region ───────────────────────────────────────────
 
@@ -418,6 +603,8 @@ export default function Page() {
         canvasRef={canvasRef}
         loading={loading}
         hasImage={!!image}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
       />
 
       {error && (
@@ -448,6 +635,8 @@ export default function Page() {
             onRegionSelect={handleRegionSelect}
             onColonyAdd={handleColonyAdd}
             onColonyToggle={handleColonyToggle}
+            onMassErase={handleMassErase}
+            onColonyDrag={handleColonyDrag}
           />
 
           {/* Mode hint banner */}
@@ -462,7 +651,7 @@ export default function Page() {
             <PlacementControls
               placement={placement}
               minRadius={mode === "place-region" ? 10 : 1}
-              maxRadius={mode === "place-region" ? 1500 : 250}
+              maxRadius={mode === "place-region" ? maxRegionRadius : 250}
               onChange={handlePlacementMove}
               onConfirm={() => {
                 if (mode === "place-region") {
@@ -549,6 +738,16 @@ export default function Page() {
               subtitle="Sample agar + a reference colony for contrast"
             >
               <div className="flex flex-col gap-2">
+                {usingSavedCalibration && (
+                  <div className="text-[11px] bg-cyan-500/10 border border-cyan-400/20 rounded px-2 py-1 text-cyan-300 flex items-center justify-between">
+                    <span>Using saved calibration</span>
+                    <button onClick={() => {
+                      setUsingSavedCalibration(false);
+                      setAgarSample(null);
+                      setColonySample(null);
+                    }} className="ml-2 hover:text-cyan-100">Reset</button>
+                  </div>
+                )}
                 <button
                   type="button"
                   disabled={!canCalibrate}
@@ -579,6 +778,36 @@ export default function Page() {
                   />
                   Invert (dark colonies on light agar)
                 </label>
+                <div className="mt-2">
+                  <label className="text-xs text-gray-400 block mb-1">Quick presets</label>
+                  <select
+                    className="w-full rounded border border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-bg)] px-2 py-1 text-xs text-gray-300"
+                    defaultValue=""
+                    onChange={(e) => {
+                      const preset = CALIBRATION_PRESETS.find(p => p.id === e.target.value);
+                      if (!preset) return;
+                      setAgarSample(preset.calibration.agarSample);
+                      setColonySample(preset.calibration.colonySample);
+                      setInvertImage(preset.calibration.invertImage);
+                      setUsingSavedCalibration(false);
+                      e.target.value = "";
+                    }}
+                  >
+                    <option value="">Apply a preset…</option>
+                    {CALIBRATION_PRESETS.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <p className="text-[11px] text-gray-500">
+                  Auto-learning: {exemplarCount < MIN_TRAIN
+                    ? `${exemplarCount}/${MIN_TRAIN} edits needed`
+                    : `Active (${learnedModel?.n ?? 0} samples)`}
+                  {exemplarCount > 0 && (
+                    <button onClick={() => { clearLearningData(); setLearnedModel(null); setExemplarCount(0); }}
+                      className="ml-2 text-red-400 hover:text-red-300">Reset</button>
+                  )}
+                </p>
               </div>
             </Section>
 
@@ -711,6 +940,15 @@ export default function Page() {
                     <Eraser size={14} /> {mode === "edit-colonies" ? "Editing" : "Edit colonies"}
                   </button>
                 </div>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setMode(mode === "mass-erase" ? "idle" : "mass-erase")}
+                    className={btnClass(mode === "mass-erase", "amber")}
+                    title="Drag to erase multiple colonies"
+                  >
+                    <RectangleHorizontal size={14} /> Mass erase
+                  </button>
+                </div>
 
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   <button
@@ -761,6 +999,8 @@ function Header(props: {
   canvasRef: React.RefObject<ImageCanvasHandle | null>;
   loading: boolean;
   hasImage: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
 }) {
   return (
     <header className="flex items-center gap-3 border-b border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-panel)] px-4 py-2">
@@ -789,6 +1029,12 @@ function Header(props: {
       )}
 
       <div className="ml-auto flex items-center gap-1">
+        <IconBtn onClick={props.onUndo} aria-label="Undo" title="Undo (⌘Z)">
+          <Undo2 size={14} />
+        </IconBtn>
+        <IconBtn onClick={props.onRedo} aria-label="Redo" title="Redo (⌘⇧Z)">
+          <Redo2 size={14} />
+        </IconBtn>
         <IconBtn onClick={() => props.canvasRef.current?.zoomOut()} aria-label="Zoom out">
           <ZoomOut size={14} />
         </IconBtn>

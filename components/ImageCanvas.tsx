@@ -10,7 +10,8 @@ export type CanvasMode =
   | "place-colony"
   | "place-region"
   | "edit-region"
-  | "edit-colonies";
+  | "edit-colonies"
+  | "mass-erase";
 
 export interface PlacementCircle {
   cx: number;
@@ -38,6 +39,8 @@ export interface ImageCanvasProps {
   onRegionSelect: (id: string) => void;
   onColonyAdd: (cx: number, cy: number) => void;
   onColonyToggle: (id: string) => void;
+  onMassErase: (ids: string[]) => void;
+  onColonyDrag: (id: string, cx: number, cy: number) => void;
 }
 
 export interface ImageCanvasHandle {
@@ -78,15 +81,20 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     onRegionSelect,
     onColonyAdd,
     onColonyToggle,
+    onMassErase,
+    onColonyDrag,
   } = props;
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const transformRef = useRef<Transform>({ scale: 1, tx: 0, ty: 0 });
 
+  // Erase rect (not state to avoid re-renders)
+  const eraseRectRef = useRef<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+
   // Drag bookkeeping
   const pointerRef = useRef<{
-    dragging: "pan" | "region-move" | "region-resize" | null;
+    dragging: "pan" | "region-move" | "region-resize" | "mass-erase-rect" | "colony-drag" | null;
     startX: number;
     startY: number;
     lastX: number;
@@ -97,6 +105,9 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     startRegionCy: number;
     startRegionRadius: number;
     button: number;
+    eraseStartX: number;
+    eraseStartY: number;
+    colonyDragId: string | null;
   }>({
     dragging: null,
     startX: 0,
@@ -109,6 +120,9 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     startRegionCy: 0,
     startRegionRadius: 0,
     button: 0,
+    eraseStartX: 0,
+    eraseStartY: 0,
+    colonyDragId: null,
   });
 
   // Fit image initially whenever it changes
@@ -264,6 +278,20 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
       }
     }
 
+    // Erase rect
+    if (eraseRectRef.current && mode === "mass-erase") {
+      const er = eraseRectRef.current;
+      ctx.beginPath();
+      ctx.rect(er.x1, er.y1, er.x2 - er.x1, er.y2 - er.y1);
+      ctx.lineWidth = 2 / t.scale;
+      ctx.setLineDash([6 / t.scale, 4 / t.scale]);
+      ctx.strokeStyle = "#ef4444";
+      ctx.stroke();
+      ctx.fillStyle = "rgba(239,68,68,0.12)";
+      ctx.fill();
+      ctx.setLineDash([]);
+    }
+
     // Placement preview
     if (placement) {
       ctx.beginPath();
@@ -351,6 +379,25 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
 
     const { x, y } = screenToImage(e.clientX, e.clientY);
 
+    // Mass-erase: start drag rect
+    if (mode === "mass-erase" && e.button === 0) {
+      eraseRectRef.current = { x1: x, y1: y, x2: x, y2: y };
+      p.dragging = "mass-erase-rect";
+      p.eraseStartX = x;
+      p.eraseStartY = y;
+      return;
+    }
+
+    // Colony drag: check hit first in edit-colonies
+    if (mode === "edit-colonies" && e.button === 0) {
+      const c = hitColony(x, y);
+      if (c) {
+        p.dragging = "colony-drag";
+        p.colonyDragId = c.id;
+        return;
+      }
+    }
+
     // In edit-region mode, check for edge (resize) first, then inside (move)
     if (mode === "edit-region" || mode === "idle") {
       const hit = hitRegion(x, y);
@@ -408,6 +455,22 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
       return;
     }
 
+    if (p.dragging === "mass-erase-rect") {
+      const { x, y } = screenToImage(e.clientX, e.clientY);
+      if (eraseRectRef.current) {
+        eraseRectRef.current.x2 = x;
+        eraseRectRef.current.y2 = y;
+      }
+      render();
+      return;
+    }
+
+    if (p.dragging === "colony-drag" && p.colonyDragId) {
+      const { x, y } = screenToImage(e.clientX, e.clientY);
+      onColonyDrag(p.colonyDragId, x, y);
+      return;
+    }
+
     void scale;
   }
 
@@ -417,6 +480,30 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     const prevDragging = p.dragging;
     p.dragging = null;
     p.targetRegionId = null;
+
+    // Handle mass-erase completion
+    if (prevDragging === "mass-erase-rect") {
+      const rect = eraseRectRef.current;
+      eraseRectRef.current = null;
+      if (wasDrag && rect) {
+        const x1 = Math.min(rect.x1, rect.x2);
+        const x2 = Math.max(rect.x1, rect.x2);
+        const y1 = Math.min(rect.y1, rect.y2);
+        const y2 = Math.max(rect.y1, rect.y2);
+        const ids = colonies
+          .filter(c => !removedColonyIds.has(c.id) && c.cx >= x1 && c.cx <= x2 && c.cy >= y1 && c.cy <= y2)
+          .map(c => c.id);
+        onMassErase(ids);
+      }
+      render();
+      return;
+    }
+
+    // Handle colony drag completion
+    if (prevDragging === "colony-drag") {
+      p.colonyDragId = null;
+      return;
+    }
 
     if (wasDrag) return;
 
@@ -453,6 +540,8 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
       ? "crosshair"
       : mode === "edit-colonies"
       ? "copy"
+      : mode === "mass-erase"
+      ? "cell"
       : "grab";
 
   return (
