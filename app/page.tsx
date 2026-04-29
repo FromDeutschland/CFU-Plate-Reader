@@ -511,27 +511,54 @@ export default function Page() {
   );
 
   const handleMassErase = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
     pushUndo();
     const idSet = new Set(ids);
-    setColonies(prev => prev.filter(c => !idSet.has(c.id) || manualColonyIds.has(c.id)));
-    setRemovedColonyIds(prev => {
-      const n = new Set(prev);
-      for (const id of ids) n.add(id);
-      return n;
-    });
-    setRemovedByRegion(m => {
-      const counts: Record<string, number> = {};
-      for (const id of ids) {
-        const c = colonies.find(x => x.id === id);
-        if (!c || manualColonyIds.has(c.id)) continue;
-        counts[c.regionId] = (counts[c.regionId] ?? 0) + 1;
-      }
-      const next = { ...m };
-      for (const [regionId, cnt] of Object.entries(counts)) {
-        next[regionId] = (next[regionId] ?? 0) + cnt;
-      }
-      return next;
-    });
+
+    // Split into manual vs auto
+    const manualToDelete = ids.filter(id => manualColonyIds.has(id));
+    const autoToHide = ids.filter(id => !manualColonyIds.has(id));
+
+    // Manual colonies: delete them entirely (same as clicking each one)
+    if (manualToDelete.length > 0) {
+      const manualSet = new Set(manualToDelete);
+      setColonies(prev => prev.filter(c => !manualSet.has(c.id)));
+      setManualColonyIds(prev => {
+        const n = new Set(prev);
+        for (const id of manualToDelete) n.delete(id);
+        return n;
+      });
+      // Adjust added counters
+      setAddedByRegion(m => {
+        const next = { ...m };
+        for (const id of manualToDelete) {
+          const c = colonies.find(x => x.id === id);
+          if (!c) continue;
+          next[c.regionId] = Math.max(0, (next[c.regionId] ?? 0) - 1);
+        }
+        return next;
+      });
+    }
+
+    // Auto colonies: flag as removed (same as clicking each one)
+    if (autoToHide.length > 0) {
+      setRemovedColonyIds(prev => {
+        const n = new Set(prev);
+        for (const id of autoToHide) n.add(id);
+        return n;
+      });
+      setRemovedByRegion(m => {
+        const next = { ...m };
+        for (const id of autoToHide) {
+          const c = colonies.find(x => x.id === id);
+          if (!c) continue;
+          next[c.regionId] = (next[c.regionId] ?? 0) + 1;
+        }
+        return next;
+      });
+    }
+
+    void idSet; // used implicitly above
   }, [colonies, manualColonyIds, pushUndo]);
 
   const handleColonyDrag = useCallback((id: string, cx: number, cy: number) => {
@@ -967,7 +994,8 @@ export default function Page() {
                 </div>
 
                 <p className="mt-2 text-[11px] text-gray-500">
-                  Click empty area inside the region to add a colony. Click an existing colony to remove it. Drag the region circle to move it; drag its edge to resize.
+                  In <b>Edit colonies</b>: click a colony to remove it · click empty space to add · drag a colony to reposition it · drag the region&apos;s edge to resize it.<br />
+                  In <b>Mass erase</b>: drag a rectangle over colonies to remove all of them at once.
                 </p>
               </Section>
             )}
@@ -1174,17 +1202,19 @@ function modeHint(mode: Mode, hasPlacement: boolean, hasPending: boolean): strin
   if (hasPending) return "";
   if (mode === "place-agar")
     return hasPlacement
-      ? "Drag or resize the cyan circle over clean agar, then Confirm."
-      : "Click on a clean patch of agar. Shift+wheel resizes.";
+      ? "Drag to reposition · Shift+scroll to resize · then Confirm."
+      : "Click or drag to place the agar sample circle.";
   if (mode === "place-colony")
     return hasPlacement
-      ? "Drag or resize the purple circle over a clear colony, then Confirm."
-      : "Click on a clear, representative colony.";
+      ? "Drag to reposition · Shift+scroll to resize · then Confirm."
+      : "Click or drag to place the colony sample circle.";
   if (mode === "place-region")
     return hasPlacement
-      ? "Adjust the region size, then Confirm to label + set dilution."
-      : "Click where the region should be centered.";
+      ? "Drag to reposition · Shift+scroll to resize · then Confirm to label."
+      : "Click or drag to place the analysis region.";
   if (mode === "edit-colonies")
-    return "Click empty area to add a colony. Click a colony to remove it.";
+    return "Click a colony to remove it · Click empty space inside the region to add one · Drag a colony to move it";
+  if (mode === "mass-erase")
+    return "Drag to draw a selection rectangle — all colonies inside will be removed";
   return "";
 }

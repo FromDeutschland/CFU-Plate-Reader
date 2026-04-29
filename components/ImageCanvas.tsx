@@ -89,12 +89,20 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const transformRef = useRef<Transform>({ scale: 1, tx: 0, ty: 0 });
 
-  // Erase rect (not state to avoid re-renders)
+  // Erase rect stored as ref to avoid triggering re-renders during drag
   const eraseRectRef = useRef<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 
-  // Drag bookkeeping
+  type DragKind =
+    | "pan"
+    | "placement-move"
+    | "region-move"
+    | "region-resize"
+    | "mass-erase-rect"
+    | "colony-drag"
+    | null;
+
   const pointerRef = useRef<{
-    dragging: "pan" | "region-move" | "region-resize" | "mass-erase-rect" | "colony-drag" | null;
+    dragging: DragKind;
     startX: number;
     startY: number;
     lastX: number;
@@ -105,8 +113,6 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     startRegionCy: number;
     startRegionRadius: number;
     button: number;
-    eraseStartX: number;
-    eraseStartY: number;
     colonyDragId: string | null;
   }>({
     dragging: null,
@@ -120,12 +126,10 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     startRegionCy: 0,
     startRegionRadius: 0,
     button: 0,
-    eraseStartX: 0,
-    eraseStartY: 0,
     colonyDragId: null,
   });
 
-  // Fit image initially whenever it changes
+  // Fit image whenever it changes
   useEffect(() => {
     if (!image || !wrapRef.current) return;
     const { clientWidth, clientHeight } = wrapRef.current;
@@ -193,7 +197,6 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     const ay = anchorScreenY ?? rect.height / 2;
     const t = transformRef.current;
     const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, t.scale * factor));
-    // Keep the anchor stationary in image space
     const ix = (ax - t.tx) / t.scale;
     const iy = (ay - t.ty) / t.scale;
     const tx = ax - ix * next;
@@ -265,37 +268,41 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
       if (removedColonyIds.has(c.id)) continue;
       const grade = manualColonyIds.has(c.id) ? "A" : gradeFromConfidence(c.confidence);
       ctx.beginPath();
-      ctx.arc(c.cx, c.cy, Math.max(c.radius, 3), 0, Math.PI * 2);
+      ctx.arc(c.cx, c.cy, Math.max(c.radius, 3 / t.scale), 0, Math.PI * 2);
       ctx.lineWidth = 2 / t.scale;
       ctx.strokeStyle =
         grade === "A" ? "#22c55e" : grade === "B" ? "#f59e0b" : "#ef4444";
       ctx.stroke();
       if (manualColonyIds.has(c.id)) {
         ctx.beginPath();
-        ctx.arc(c.cx, c.cy, 2 / t.scale, 0, Math.PI * 2);
+        ctx.arc(c.cx, c.cy, 3 / t.scale, 0, Math.PI * 2);
         ctx.fillStyle = "#22c55e";
         ctx.fill();
       }
     }
 
-    // Erase rect
-    if (eraseRectRef.current && mode === "mass-erase") {
+    // Erase rect overlay
+    if (eraseRectRef.current) {
       const er = eraseRectRef.current;
+      const rx1 = Math.min(er.x1, er.x2);
+      const ry1 = Math.min(er.y1, er.y2);
+      const rw = Math.abs(er.x2 - er.x1);
+      const rh = Math.abs(er.y2 - er.y1);
+      ctx.fillStyle = "rgba(239,68,68,0.15)";
+      ctx.fillRect(rx1, ry1, rw, rh);
       ctx.beginPath();
-      ctx.rect(er.x1, er.y1, er.x2 - er.x1, er.y2 - er.y1);
+      ctx.rect(rx1, ry1, rw, rh);
       ctx.lineWidth = 2 / t.scale;
       ctx.setLineDash([6 / t.scale, 4 / t.scale]);
       ctx.strokeStyle = "#ef4444";
       ctx.stroke();
-      ctx.fillStyle = "rgba(239,68,68,0.12)";
-      ctx.fill();
       ctx.setLineDash([]);
     }
 
     // Placement preview
     if (placement) {
       ctx.beginPath();
-      ctx.arc(placement.cx, placement.cy, placement.radius, 0, Math.PI * 2);
+      ctx.arc(placement.cx, placement.cy, Math.max(placement.radius, 1), 0, Math.PI * 2);
       ctx.lineWidth = 2 / t.scale;
       ctx.setLineDash([6 / t.scale, 4 / t.scale]);
       ctx.strokeStyle =
@@ -320,15 +327,43 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     mode,
   ]);
 
-  // ── Input ──────────────────────────────────────────────────────────────
+  // ── Hit testing ────────────────────────────────────────────────────────
+
+  function hitRegion(x: number, y: number): SelectionRegion | null {
+    for (let i = regions.length - 1; i >= 0; i--) {
+      const r = regions[i];
+      const d = Math.hypot(x - r.cx, y - r.cy);
+      if (d <= r.radius + 10 / transformRef.current.scale) return r;
+    }
+    return null;
+  }
+
+  function hitRegionEdge(r: SelectionRegion, x: number, y: number): boolean {
+    const d = Math.hypot(x - r.cx, y - r.cy);
+    const edgeBand = 12 / transformRef.current.scale;
+    return Math.abs(d - r.radius) <= edgeBand;
+  }
+
+  function hitColony(x: number, y: number): Colony | null {
+    for (let i = colonies.length - 1; i >= 0; i--) {
+      const c = colonies[i];
+      if (removedColonyIds.has(c.id)) continue;
+      // Generous hit target: max of actual radius or 8px in image space
+      const hitR = Math.max(c.radius, 8 / transformRef.current.scale);
+      if (Math.hypot(x - c.cx, y - c.cy) <= hitR) return c;
+    }
+    return null;
+  }
+
+  // ── Wheel zoom ─────────────────────────────────────────────────────────
 
   function onWheel(e: React.WheelEvent<HTMLDivElement>) {
     e.preventDefault();
     const rect = wrapRef.current!.getBoundingClientRect();
-    // Shift+wheel: resize placement (if any), else normal zoom.
+    // Shift+wheel → resize placement if one is active
     if (e.shiftKey && placement) {
       const delta = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-      const r = Math.max(5, placement.radius * delta);
+      const r = Math.max(1, placement.radius * delta);
       onPlacementMove({ ...placement, radius: r });
       return;
     }
@@ -336,32 +371,7 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     zoomBy(factor, e.clientX - rect.left, e.clientY - rect.top);
   }
 
-  function hitRegion(x: number, y: number): SelectionRegion | null {
-    // Prefer active region if hit; else most recent (last added)
-    for (let i = regions.length - 1; i >= 0; i--) {
-      const r = regions[i];
-      const d = Math.hypot(x - r.cx, y - r.cy);
-      if (d <= r.radius + 6 / transformRef.current.scale) return r;
-    }
-    return null;
-  }
-
-  function hitRegionEdge(r: SelectionRegion, x: number, y: number): boolean {
-    const d = Math.hypot(x - r.cx, y - r.cy);
-    const edgeBand = 8 / transformRef.current.scale;
-    return Math.abs(d - r.radius) <= edgeBand;
-  }
-
-  function hitColony(x: number, y: number): Colony | null {
-    // Check colonies in reverse (newer first)
-    for (let i = colonies.length - 1; i >= 0; i--) {
-      const c = colonies[i];
-      if (removedColonyIds.has(c.id)) continue;
-      const r = Math.max(c.radius, 4 / transformRef.current.scale);
-      if (Math.hypot(x - c.cx, y - c.cy) <= r + 3 / transformRef.current.scale) return c;
-    }
-    return null;
-  }
+  // ── Pointer events ─────────────────────────────────────────────────────
 
   function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     wrapRef.current!.setPointerCapture(e.pointerId);
@@ -370,54 +380,74 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     p.startY = p.lastY = e.clientY;
     p.movedPx = 0;
     p.button = e.button;
+    p.colonyDragId = null;
 
-    // Middle button or space+drag → pan always
-    if (e.button === 1 || e.button === 2) {
+    // Non-primary button → pan only
+    if (e.button !== 0) {
       p.dragging = "pan";
       return;
     }
 
     const { x, y } = screenToImage(e.clientX, e.clientY);
 
-    // Mass-erase: start drag rect
-    if (mode === "mass-erase" && e.button === 0) {
-      eraseRectRef.current = { x1: x, y1: y, x2: x, y2: y };
-      p.dragging = "mass-erase-rect";
-      p.eraseStartX = x;
-      p.eraseStartY = y;
+    // ── Placement modes ────────────────────────────────────────────────
+    // Clicking OR dragging repositions the circle. No pan in these modes.
+    if (mode === "place-agar" || mode === "place-colony" || mode === "place-region") {
+      p.dragging = "placement-move";
+      const radius = placement?.radius ?? defaultRadius;
+      // Immediate visual: move circle to pointer position right away
+      onPlacementMove({ cx: x, cy: y, radius });
       return;
     }
 
-    // Colony drag: check hit first in edit-colonies
-    if (mode === "edit-colonies" && e.button === 0) {
-      const c = hitColony(x, y);
-      if (c) {
+    // ── Mass-erase mode ────────────────────────────────────────────────
+    if (mode === "mass-erase") {
+      eraseRectRef.current = { x1: x, y1: y, x2: x, y2: y };
+      p.dragging = "mass-erase-rect";
+      return;
+    }
+
+    // ── Edit-colonies mode ────────────────────────────────────────────
+    if (mode === "edit-colonies") {
+      // 1. Colony hit → could be drag or click; decide in pointerUp
+      const colony = hitColony(x, y);
+      if (colony) {
         p.dragging = "colony-drag";
-        p.colonyDragId = c.id;
+        p.colonyDragId = colony.id;
         return;
       }
+      // 2. Region edge → resize (allowed in edit-colonies so you don't need to switch modes)
+      const regionHit = hitRegion(x, y);
+      if (regionHit && hitRegionEdge(regionHit, x, y)) {
+        onRegionSelect(regionHit.id);
+        p.dragging = "region-resize";
+        p.targetRegionId = regionHit.id;
+        p.startRegionRadius = regionHit.radius;
+        return;
+      }
+      // 3. Otherwise → pan (click on empty space will add colony in pointerUp)
+      p.dragging = "pan";
+      return;
     }
 
-    // In edit-region mode, check for edge (resize) first, then inside (move)
-    if (mode === "edit-region" || mode === "idle") {
-      const hit = hitRegion(x, y);
-      if (hit) {
-        onRegionSelect(hit.id);
-        if (hitRegionEdge(hit, x, y)) {
-          p.dragging = "region-resize";
-          p.targetRegionId = hit.id;
-          p.startRegionRadius = hit.radius;
-          return;
-        }
+    // ── Idle / edit-region: region move + resize ──────────────────────
+    const regionHit = hitRegion(x, y);
+    if (regionHit) {
+      onRegionSelect(regionHit.id);
+      if (hitRegionEdge(regionHit, x, y)) {
+        p.dragging = "region-resize";
+        p.targetRegionId = regionHit.id;
+        p.startRegionRadius = regionHit.radius;
+      } else {
         p.dragging = "region-move";
-        p.targetRegionId = hit.id;
-        p.startRegionCx = hit.cx;
-        p.startRegionCy = hit.cy;
-        return;
+        p.targetRegionId = regionHit.id;
+        p.startRegionCx = regionHit.cx;
+        p.startRegionCy = regionHit.cy;
       }
+      return;
     }
 
-    // Default: begin a potential pan
+    // Default: pan
     p.dragging = "pan";
   }
 
@@ -431,12 +461,17 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     p.lastY = e.clientY;
     p.movedPx += Math.hypot(dxScreen, dyScreen);
 
-    const scale = transformRef.current.scale;
-
     if (p.dragging === "pan") {
       transformRef.current.tx += dxScreen;
       transformRef.current.ty += dyScreen;
       render();
+      return;
+    }
+
+    if (p.dragging === "placement-move") {
+      const { x, y } = screenToImage(e.clientX, e.clientY);
+      const radius = placement?.radius ?? defaultRadius;
+      onPlacementMove({ cx: x, cy: y, radius });
       return;
     }
 
@@ -470,61 +505,73 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
       onColonyDrag(p.colonyDragId, x, y);
       return;
     }
-
-    void scale;
   }
 
   function onPointerUp(e: React.PointerEvent<HTMLDivElement>) {
     const p = pointerRef.current;
-    const wasDrag = p.movedPx > 4;
+    const wasDrag = p.movedPx > 5;
     const prevDragging = p.dragging;
+    const savedColonyDragId = p.colonyDragId;
     p.dragging = null;
     p.targetRegionId = null;
+    p.colonyDragId = null;
 
-    // Handle mass-erase completion
+    // ── Placement: commit final circle position ────────────────────────
+    if (prevDragging === "placement-move") {
+      const { x, y } = screenToImage(e.clientX, e.clientY);
+      const radius = placement?.radius ?? defaultRadius;
+      onPlacementCommit({ cx: x, cy: y, radius });
+      return;
+    }
+
+    // ── Mass-erase: execute if a rect was dragged ──────────────────────
     if (prevDragging === "mass-erase-rect") {
       const rect = eraseRectRef.current;
       eraseRectRef.current = null;
+      render(); // clear the rect overlay
+
       if (wasDrag && rect) {
         const x1 = Math.min(rect.x1, rect.x2);
         const x2 = Math.max(rect.x1, rect.x2);
         const y1 = Math.min(rect.y1, rect.y2);
         const y2 = Math.max(rect.y1, rect.y2);
         const ids = colonies
-          .filter(c => !removedColonyIds.has(c.id) && c.cx >= x1 && c.cx <= x2 && c.cy >= y1 && c.cy <= y2)
-          .map(c => c.id);
-        onMassErase(ids);
+          .filter(
+            (c) =>
+              !removedColonyIds.has(c.id) &&
+              c.cx >= x1 && c.cx <= x2 &&
+              c.cy >= y1 && c.cy <= y2,
+          )
+          .map((c) => c.id);
+        if (ids.length > 0) onMassErase(ids);
       }
-      render();
       return;
     }
 
-    // Handle colony drag completion
+    // ── Colony drag: click (toggle) vs actual drag (move) ─────────────
     if (prevDragging === "colony-drag") {
-      p.colonyDragId = null;
+      if (!wasDrag && savedColonyDragId) {
+        // Short movement = user clicked → toggle the colony
+        onColonyToggle(savedColonyDragId);
+      }
+      // If wasDrag, position was already committed via onColonyDrag in pointermove
       return;
     }
 
-    if (wasDrag) return;
+    // ── Region move/resize: nothing extra needed ───────────────────────
+    if (prevDragging === "region-move" || prevDragging === "region-resize") {
+      return;
+    }
 
-    // Treat as click
-    if (prevDragging === "pan" || prevDragging == null || e.button !== 0) {
+    // ── Pan that didn't actually pan → treat as click ──────────────────
+    if (prevDragging === "pan" && !wasDrag && e.button === 0) {
       const { x, y } = screenToImage(e.clientX, e.clientY);
 
-      if (mode === "place-agar" || mode === "place-colony" || mode === "place-region") {
-        const radius = placement?.radius ?? defaultRadius;
-        onPlacementCommit({ cx: x, cy: y, radius });
-        return;
-      }
-
       if (mode === "edit-colonies") {
-        const c = hitColony(x, y);
-        if (c) {
-          onColonyToggle(c.id);
-        } else {
-          // Only add if inside some region
-          const hit = hitRegion(x, y);
-          if (hit) onColonyAdd(x, y);
+        // Click on empty space inside a region → add a colony
+        const regionHit = hitRegion(x, y);
+        if (regionHit && !hitRegionEdge(regionHit, x, y)) {
+          onColonyAdd(x, y);
         }
         return;
       }
@@ -535,6 +582,7 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     e.preventDefault();
   }
 
+  // Cursor reflects current mode and drag state
   const cursor =
     mode === "place-agar" || mode === "place-colony" || mode === "place-region"
       ? "crosshair"
