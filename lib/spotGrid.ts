@@ -56,15 +56,86 @@ export function defaultSpotGridConfig(): SpotGridConfig {
   };
 }
 
+/**
+ * Detect the main agar plate circle in the image.
+ * Uses the fact that the background is near-white while the plate is cream/beige.
+ * Returns centre + radius in image-pixel coordinates, or null on failure.
+ */
+export function detectPlateCircle(
+  img: HTMLImageElement,
+): { cx: number; cy: number; radius: number } | null {
+  // Work at a fixed low resolution for speed
+  const targetW = 500;
+  const scale = Math.min(1, targetW / img.naturalWidth);
+  const sw = Math.round(img.naturalWidth * scale);
+  const sh = Math.round(img.naturalHeight * scale);
+
+  const oc = document.createElement("canvas");
+  oc.width = sw; oc.height = sh;
+  const ctx = oc.getContext("2d")!;
+  ctx.drawImage(img, 0, 0, sw, sh);
+  const { data } = ctx.getImageData(0, 0, sw, sh);
+
+  // Classify each pixel: background (very bright, near-neutral) vs plate
+  let minX = sw, maxX = 0, minY = sh, maxY = 0;
+  let sumX = 0, sumY = 0, n = 0;
+
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      const i = (y * sw + x) * 4;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const brightness = (r + g + b) / 3;
+      const maxC = Math.max(r, g, b), minC = Math.min(r, g, b);
+      const sat = maxC > 0 ? (maxC - minC) / maxC : 0;
+      // White background = very bright + low saturation
+      if (brightness > 225 && sat < 0.18) continue;
+      // Pixels below 30 are probably shadows/text — exclude too
+      if (brightness < 30) continue;
+
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      sumX += x; sumY += y; n++;
+    }
+  }
+
+  if (n < 200) return null; // not enough plate pixels found
+
+  // Estimate circle: centre = centroid of plate pixels, radius = half bounding diagonal
+  const cx = (sumX / n) / scale;
+  const cy = (sumY / n) / scale;
+  const bW = (maxX - minX) / scale;
+  const bH = (maxY - minY) / scale;
+  const radius = Math.min(bW, bH) / 2; // use the smaller dimension to avoid the tag/label
+
+  return { cx, cy, radius };
+}
+
+/**
+ * Derive a good default grid layout from the detected plate circle.
+ * Spot grids on these plates typically fill ~70% of plate width and ~90% of height.
+ */
 export function defaultSpotGridLayout(img: HTMLImageElement | null): SpotGridLayout {
   if (!img) return { x0: 50, y0: 50, x1: 300, y1: 600 };
+
+  const circle = detectPlateCircle(img);
+  if (circle) {
+    const { cx, cy, radius } = circle;
+    // Conservative inner bounds — spots don't go all the way to the plate edge
+    return {
+      x0: Math.round(cx - radius * 0.68),
+      y0: Math.round(cy - radius * 0.88),
+      x1: Math.round(cx + radius * 0.68),
+      y1: Math.round(cy + radius * 0.88),
+    };
+  }
+
+  // Fallback: assume plate is centred in the middle third of the image
   const w = img.naturalWidth, h = img.naturalHeight;
-  // Rough guess: the grid occupies the inner 30–70% of the image
   return {
-    x0: Math.round(w * 0.15),
-    y0: Math.round(h * 0.10),
-    x1: Math.round(w * 0.85),
-    y1: Math.round(h * 0.85),
+    x0: Math.round(w * 0.25),
+    y0: Math.round(h * 0.08),
+    x1: Math.round(w * 0.75),
+    y1: Math.round(h * 0.88),
   };
 }
 

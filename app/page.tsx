@@ -27,6 +27,7 @@ import {
 import {
   defaultSpotGridConfig,
   defaultSpotGridLayout,
+  detectPlateCircle,
   createSpotRegions,
   assessAllSpots,
   buildPlateLayoutRows,
@@ -188,10 +189,7 @@ export default function Page() {
     [invertImage, calibration, sensitivity, splitTouching, minSpacing, minArea, maxArea, minCircularity],
   );
 
-  const defaultPlacementRadius = useMemo(() => {
-    if (!image) return 80;
-    return Math.min(image.naturalWidth, image.naturalHeight) * 0.08;
-  }, [image]);
+  const defaultPlacementRadius = 140; // always start at 140px
 
   // Feature 1: Dynamic max region radius
   const maxRegionRadius = useMemo(() => {
@@ -777,8 +775,8 @@ export default function Page() {
           {placement && (mode === "place-agar" || mode === "place-colony" || mode === "place-region") && !pendingRegion && (
             <PlacementControls
               placement={placement}
-              minRadius={mode === "place-region" ? 10 : 1}
-              maxRadius={mode === "place-region" ? maxRegionRadius : 250}
+              minRadius={10}
+              maxRadius={mode === "place-region" ? maxRegionRadius : 1000}
               onChange={handlePlacementMove}
               onConfirm={() => {
                 if (mode === "place-region") {
@@ -986,8 +984,10 @@ export default function Page() {
               <button
                 type="button"
                 onClick={() => {
-                  setShowSpotGridPanel(v => !v);
-                  if (!spotGridLayout && image) setSpotGridLayout(defaultSpotGridLayout(image));
+                  const next = !showSpotGridPanel;
+                  setShowSpotGridPanel(next);
+                  // Always re-detect the plate circle when opening
+                  if (next && image) setSpotGridLayout(defaultSpotGridLayout(image));
                 }}
                 className={btnClass(showSpotGridPanel, "amber")}
                 disabled={!image}
@@ -1048,29 +1048,53 @@ export default function Page() {
                     </div>
                   </div>
 
-                  {/* Grid bounds (pixel coords in image space) */}
-                  {spotGridLayout && (
-                    <details className="group">
-                      <summary className="text-[11px] text-gray-400 cursor-pointer list-none flex items-center gap-1">
-                        <span className="group-open:rotate-90 inline-block transition-transform">▶</span>
-                        Grid bounds (image px)
-                      </summary>
-                      <div className="mt-2 grid grid-cols-2 gap-2">
-                        {(["x0","y0","x1","y1"] as const).map(k => (
-                          <div key={k}>
-                            <label className="text-[10px] text-gray-500">{k.toUpperCase()}</label>
-                            <input type="number" value={Math.round(spotGridLayout[k])}
-                              onChange={e => setSpotGridLayout(l => l ? { ...l, [k]: +e.target.value } : l)}
-                              className="mt-0.5 w-full rounded border border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-bg)] px-2 py-1 text-xs" />
+                  {/* Grid bounds — sliders as % of image size */}
+                  {spotGridLayout && image && (() => {
+                    const iw = image.naturalWidth, ih = image.naturalHeight;
+                    const toSlider = (v: number, max: number) => Math.round((v / max) * 100);
+                    const fromSlider = (pct: number, max: number) => Math.round(pct / 100 * max);
+                    return (
+                      <div className="bg-[color:var(--color-plate-bg)] rounded p-2 flex flex-col gap-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-gray-400 font-medium">Grid position</span>
+                          <button
+                            className="text-[10px] text-amber-400 hover:text-amber-200"
+                            onClick={() => {
+                              const circle = detectPlateCircle(image);
+                              if (circle) {
+                                const { cx, cy, radius } = circle;
+                                setSpotGridLayout({
+                                  x0: Math.round(cx - radius * 0.68),
+                                  y0: Math.round(cy - radius * 0.88),
+                                  x1: Math.round(cx + radius * 0.68),
+                                  y1: Math.round(cy + radius * 0.88),
+                                });
+                              } else {
+                                setSpotGridLayout(defaultSpotGridLayout(image));
+                              }
+                            }}
+                          >Re-fit to plate</button>
+                        </div>
+                        {[
+                          { key: "x0" as const, label: "Left edge %", max: iw },
+                          { key: "x1" as const, label: "Right edge %", max: iw },
+                          { key: "y0" as const, label: "Top edge %", max: ih },
+                          { key: "y1" as const, label: "Bottom edge %", max: ih },
+                        ].map(({ key, label, max }) => (
+                          <div key={key}>
+                            <div className="flex justify-between text-[10px] text-gray-500">
+                              <span>{label}</span>
+                              <span>{toSlider(spotGridLayout[key], max)}%</span>
+                            </div>
+                            <input type="range" min={0} max={100} step={1}
+                              value={toSlider(spotGridLayout[key], max)}
+                              onChange={e => setSpotGridLayout(l => l ? { ...l, [key]: fromSlider(+e.target.value, max) } : l)}
+                              className="w-full" />
                           </div>
                         ))}
                       </div>
-                      <button className="mt-1 text-[10px] text-gray-400 hover:text-gray-200"
-                        onClick={() => image && setSpotGridLayout(defaultSpotGridLayout(image))}>
-                        Reset to auto-estimate
-                      </button>
-                    </details>
-                  )}
+                    );
+                  })()}
 
                   {/* Spot volume */}
                   <div>
