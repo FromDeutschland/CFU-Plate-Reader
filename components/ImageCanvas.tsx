@@ -19,6 +19,12 @@ export interface PlacementCircle {
   radius: number;
 }
 
+export interface SpotGridPreview {
+  x0: number; y0: number;
+  x1: number; y1: number;
+  rows: number; cols: number;
+}
+
 export interface ImageCanvasProps {
   image: HTMLImageElement | null;
   mode: CanvasMode;
@@ -32,6 +38,8 @@ export interface ImageCanvasProps {
   placement: PlacementCircle | null;
   /** Default radius for fresh placement clicks. */
   defaultRadius: number;
+  /** Optional spot grid preview overlay */
+  spotGridPreview?: SpotGridPreview | null;
   onPlacementCommit: (circle: PlacementCircle) => void;
   onPlacementMove: (circle: PlacementCircle) => void;
   onRegionMove: (id: string, cx: number, cy: number) => void;
@@ -74,6 +82,7 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     colonySample,
     placement,
     defaultRadius,
+    spotGridPreview,
     onPlacementCommit,
     onPlacementMove,
     onRegionMove,
@@ -159,6 +168,7 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     placement,
     activeRegionId,
     mode,
+    spotGridPreview,
   ]);
 
   // Resize handling
@@ -313,6 +323,40 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
       ctx.setLineDash([]);
     }
 
+    // Spot grid preview overlay
+    if (spotGridPreview) {
+      const { x0: gx0, y0: gy0, x1: gx1, y1: gy1, rows: gRows, cols: gCols } = spotGridPreview;
+      const cellW = (gx1 - gx0) / gCols;
+      const cellH = (gy1 - gy0) / gRows;
+      const spotR = Math.min(cellW, cellH) * 0.38;
+      ctx.setLineDash([4 / t.scale, 3 / t.scale]);
+      ctx.lineWidth = 1.5 / t.scale;
+      // Draw outer bounding box
+      ctx.strokeStyle = "rgba(250,204,21,0.6)";
+      ctx.strokeRect(gx0, gy0, gx1 - gx0, gy1 - gy0);
+      // Draw each cell circle
+      for (let row = 0; row < gRows; row++) {
+        for (let col = 0; col < gCols; col++) {
+          const cx = gx0 + cellW * (col + 0.5);
+          const cy = gy0 + cellH * (row + 0.5);
+          ctx.beginPath();
+          ctx.arc(cx, cy, spotR, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(250,204,21,${row === 0 ? 0.9 : 0.5})`;
+          ctx.stroke();
+        }
+      }
+      ctx.setLineDash([]);
+      // Row labels (dilution row numbers)
+      ctx.font = `${11 / t.scale}px ui-sans-serif, system-ui, sans-serif`;
+      ctx.fillStyle = "rgba(250,204,21,0.85)";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      for (let row = 0; row < gRows; row++) {
+        const cy = gy0 + cellH * (row + 0.5);
+        ctx.fillText(`R${row + 1}`, gx0 - 4 / t.scale, cy);
+      }
+    }
+
     ctx.restore();
   }, [
     image,
@@ -325,6 +369,7 @@ export const ImageCanvas = forwardRef<ImageCanvasHandle, ImageCanvasProps>(funct
     placement,
     activeRegionId,
     mode,
+    spotGridPreview,
   ]);
 
   // ── Hit testing ────────────────────────────────────────────────────────
