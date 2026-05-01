@@ -103,6 +103,10 @@ export default function Page() {
   const [sensitivity, setSensitivity] = useState(1.0);
   const [splitTouching, setSplitTouching] = useState(true);
   const [minSpacing, setMinSpacing] = useState(14);
+  // Detection size / shape filters
+  const [minArea, setMinArea] = useState(defaultDetectionParams.minArea);
+  const [maxArea, setMaxArea] = useState(defaultDetectionParams.maxArea);
+  const [minCircularity, setMinCircularity] = useState(defaultDetectionParams.minCircularity);
 
   // Learning
   const [learnedModel, setLearnedModel] = useState<LearnedModel | null>(null);
@@ -159,8 +163,11 @@ export default function Page() {
       sensitivity,
       watershed: splitTouching,
       watershedMinSeparation: minSpacing,
+      minArea,
+      maxArea,
+      minCircularity,
     }),
-    [invertImage, calibration, sensitivity, splitTouching, minSpacing],
+    [invertImage, calibration, sensitivity, splitTouching, minSpacing, minArea, maxArea, minCircularity],
   );
 
   const defaultPlacementRadius = useMemo(() => {
@@ -615,7 +622,8 @@ export default function Page() {
   // ── Render helpers ─────────────────────────────────────────────────────
 
   const canCalibrate = !!image;
-  const canPlaceRegion = !!image && !!calibration;
+  // Regions can be placed without calibration — detection falls back to luminance mode
+  const canPlaceRegion = !!image;
   const hasActiveDetection =
     !!activeRegion && colonies.some((c) => c.regionId === activeRegion.id);
 
@@ -952,6 +960,89 @@ export default function Page() {
                     </div>
                   </>
                 )}
+
+                {/* Colony size / shape filters */}
+                <details className="mt-3 group">
+                  <summary className="text-xs text-gray-400 cursor-pointer select-none list-none flex items-center gap-1">
+                    <span className="group-open:rotate-90 inline-block transition-transform">▶</span>
+                    Colony size &amp; shape filters
+                    {(minArea !== defaultDetectionParams.minArea ||
+                      maxArea !== defaultDetectionParams.maxArea ||
+                      minCircularity !== defaultDetectionParams.minCircularity) && (
+                      <span className="ml-1 text-amber-400 text-[10px]">●</span>
+                    )}
+                  </summary>
+                  <div className="mt-2 flex flex-col gap-2">
+                    <p className="text-[11px] text-gray-500">
+                      If 0 colonies are detected, lower <b>Min size</b> or <b>Min roundness</b>.
+                    </p>
+
+                    <label className="block text-xs text-gray-400">
+                      Min colony size
+                      <span className="ml-2 text-gray-500 tabular-nums">{minArea} px²</span>
+                    </label>
+                    <input
+                      type="range"
+                      min={3}
+                      max={200}
+                      step={1}
+                      value={minArea}
+                      onChange={(e) => setMinArea(parseInt(e.target.value, 10))}
+                      className="w-full"
+                    />
+                    <div className="flex justify-between text-[10px] text-gray-500">
+                      <span>tiny colonies</span>
+                      <span>large colonies only</span>
+                    </div>
+
+                    <label className="block text-xs text-gray-400">
+                      Max colony size
+                      <span className="ml-2 text-gray-500 tabular-nums">{maxArea} px²</span>
+                    </label>
+                    <input
+                      type="range"
+                      min={100}
+                      max={50000}
+                      step={100}
+                      value={maxArea}
+                      onChange={(e) => setMaxArea(parseInt(e.target.value, 10))}
+                      className="w-full"
+                    />
+                    <div className="flex justify-between text-[10px] text-gray-500">
+                      <span>include small blobs</span>
+                      <span>allow very large</span>
+                    </div>
+
+                    <label className="block text-xs text-gray-400">
+                      Min roundness
+                      <span className="ml-2 text-gray-500 tabular-nums">{minCircularity.toFixed(2)}</span>
+                    </label>
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={0.9}
+                      step={0.05}
+                      value={minCircularity}
+                      onChange={(e) => setMinCircularity(parseFloat(e.target.value))}
+                      className="w-full"
+                    />
+                    <div className="flex justify-between text-[10px] text-gray-500">
+                      <span>any shape</span>
+                      <span>circles only</span>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        setMinArea(defaultDetectionParams.minArea);
+                        setMaxArea(defaultDetectionParams.maxArea);
+                        setMinCircularity(defaultDetectionParams.minCircularity);
+                      }}
+                      className="text-[11px] text-gray-400 hover:text-gray-200 text-left"
+                    >
+                      Reset to defaults
+                    </button>
+                  </div>
+                </details>
 
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <button
