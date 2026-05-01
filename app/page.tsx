@@ -332,7 +332,11 @@ export default function Page() {
     if (!image) return [];
     const detected = detectColoniesInRegion(image, region, params);
     const mapped = detected.map((c) => ({ ...c, regionId: region.id }));
-    return applyLearnedModel(mapped, learnedModel);
+    const result = applyLearnedModel(mapped, learnedModel);
+    console.log(
+      `[CFU] Region ${region.label}: raw=${detected.length}, after-model=${result.length}, model=${learnedModel ? `active (n=${learnedModel.n})` : "off"}`,
+    );
+    return result;
   }
 
   function handleConfirmRegion() {

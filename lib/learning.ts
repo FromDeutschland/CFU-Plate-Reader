@@ -83,7 +83,10 @@ export function scoreColony(c: Colony, model: LearnedModel): number {
 
 export function applyLearnedModel(colonies: Colony[], model: LearnedModel | null): Colony[] {
   if (!model) return colonies;
-  return colonies
-    .map(c => ({ ...c, confidence: c.confidence * 0.5 + scoreColony(c, model) * 0.5 }))
-    .filter(c => scoreColony(c, model) > 0.15);
+  // Only blend confidence — never hard-filter. The user can see low-confidence
+  // colonies graded as C and decide to remove them manually.
+  return colonies.map(c => ({
+    ...c,
+    confidence: c.confidence * 0.5 + scoreColony(c, model) * 0.5,
+  }));
 }
