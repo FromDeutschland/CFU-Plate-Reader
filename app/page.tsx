@@ -22,20 +22,7 @@ import {
   type CanvasMode,
   type ImageCanvasHandle,
   type PlacementCircle,
-  type SpotGridPreview,
 } from "@/components/ImageCanvas";
-import {
-  defaultSpotGridConfig,
-  defaultSpotGridLayout,
-  detectPlateCircle,
-  createSpotRegions,
-  assessAllSpots,
-  buildPlateLayoutRows,
-  downloadPlateLayoutCsv,
-  type SpotGridConfig,
-  type SpotGridLayout,
-  type SpotMeta,
-} from "@/lib/spotGrid";
 import { HistoryPanel } from "@/components/HistoryPanel";
 import { loadImageFile, loadImageElement } from "@/lib/imageLoader";
 import {
@@ -128,11 +115,6 @@ export default function Page() {
   // Calibration presets
   const [usingSavedCalibration, setUsingSavedCalibration] = useState(false);
 
-  // Spot grid workflow
-  const [spotGridConfig, setSpotGridConfig] = useState<SpotGridConfig>(defaultSpotGridConfig());
-  const [spotGridLayout, setSpotGridLayout] = useState<SpotGridLayout | null>(null);
-  const [spotMeta, setSpotMeta] = useState<SpotMeta[]>([]);
-  const [showSpotGridPanel, setShowSpotGridPanel] = useState(false);
 
   // Undo/redo
   const undoStackRef = useRef<AppSnapshot[]>([]);
@@ -455,61 +437,6 @@ export default function Page() {
 
   // ── Spot grid workflow ────────────────────────────────────────────────
 
-  function handlePlaceSpotGrid() {
-    if (!image) return;
-    const layout = spotGridLayout ?? defaultSpotGridLayout(image);
-    setSpotGridLayout(layout);
-    // Generate all spot regions
-    const { regions: newRegions, meta } = createSpotRegions(spotGridConfig, layout);
-    pushUndo();
-    // Remove old spot regions (id starts with "spot-"), keep manually-placed regions
-    const newSpotIds = new Set(newRegions.map(r => r.id));
-    setRegions(prev => [
-      ...prev.filter(r => !r.id.startsWith("spot-") && !newSpotIds.has(r.id)),
-      ...newRegions,
-    ]);
-    setSpotMeta(meta);
-    setActiveRegionId(newRegions[0]?.id ?? null);
-    setMode("edit-colonies");
-
-    // Run detection on each region, then assess countability
-    const detectedAll: Colony[] = [];
-    const countsByRegion: Record<string, number> = {};
-    for (const region of newRegions) {
-      const detected = detectForRegion(region);
-      detectedAll.push(...detected);
-      countsByRegion[region.id] = detected.length;
-    }
-    setColonies(prev => [...prev, ...detectedAll]);
-
-    // Assess NC vs countable
-    const updatedMeta = assessAllSpots(image, meta, newRegions, countsByRegion);
-    setSpotMeta(updatedMeta);
-
-    // Mark NC regions' colonies as removed (they show NC in export, but keep data)
-    const ncRegionIds = new Set(updatedMeta.filter(m => m.countability === "NC").map(m => m.regionId));
-    if (ncRegionIds.size > 0) {
-      setRemovedColonyIds(prev => {
-        const next = new Set(prev);
-        for (const c of detectedAll) {
-          if (ncRegionIds.has(c.regionId)) next.add(c.id);
-        }
-        return next;
-      });
-    }
-  }
-
-  function handleExportPlateLayout() {
-    if (spotMeta.length === 0) return;
-    const countsByRegion: Record<string, number> = {};
-    for (const c of colonies) {
-      if (removedColonyIds.has(c.id)) continue;
-      countsByRegion[c.regionId] = (countsByRegion[c.regionId] ?? 0) + 1;
-    }
-    const rows = buildPlateLayoutRows(spotGridConfig, spotMeta, countsByRegion);
-    downloadPlateLayoutCsv([{ cfg: spotGridConfig, rows }]);
-  }
-
   // ── Colony edit ────────────────────────────────────────────────────────
 
   const handleColonyAdd = useCallback(
@@ -525,8 +452,8 @@ export default function Page() {
         id,
         cx: x,
         cy: y,
-        radius: Math.max(6, region.radius * 0.03),
-        area: Math.PI * 6 * 6,
+        radius: 10,
+        area: Math.PI * 10 * 10,
         circularity: 1,
         brightness: 255,
         confidence: 1,
@@ -702,17 +629,6 @@ export default function Page() {
   // Regions can be placed without calibration — detection falls back to luminance mode
   const canPlaceRegion = !!image;
 
-  // Spot grid preview for canvas overlay
-  const spotGridPreview: SpotGridPreview | null = spotGridLayout && showSpotGridPanel
-    ? {
-        x0: spotGridLayout.x0,
-        y0: spotGridLayout.y0,
-        x1: spotGridLayout.x1,
-        y1: spotGridLayout.y1,
-        rows: spotGridConfig.rows,
-        cols: spotGridConfig.cols,
-      }
-    : null;
   const hasActiveDetection =
     !!activeRegion && colonies.some((c) => c.regionId === activeRegion.id);
 
@@ -761,7 +677,6 @@ export default function Page() {
             onColonyToggle={handleColonyToggle}
             onMassErase={handleMassErase}
             onColonyDrag={handleColonyDrag}
-            spotGridPreview={spotGridPreview}
           />
 
           {/* Mode hint banner */}
@@ -974,168 +889,6 @@ export default function Page() {
                   </li>
                 ))}
               </ul>
-            </Section>
-
-            {/* Spot Grid workflow */}
-            <Section
-              title="Spot grid (optional)"
-              subtitle="Auto-place all regions for a serial dilution spot plate. Assigns dilutions by row and auto-detects on all spots."
-            >
-              <button
-                type="button"
-                onClick={() => {
-                  const next = !showSpotGridPanel;
-                  setShowSpotGridPanel(next);
-                  // Always re-detect the plate circle when opening
-                  if (next && image) setSpotGridLayout(defaultSpotGridLayout(image));
-                }}
-                className={btnClass(showSpotGridPanel, "amber")}
-                disabled={!image}
-              >
-                <RectangleHorizontal size={14} />
-                {showSpotGridPanel ? "Hide grid setup" : "Set up spot grid"}
-              </button>
-
-              {showSpotGridPanel && (
-                <div className="mt-3 flex flex-col gap-3">
-                  {/* Grid dimensions */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[11px] text-gray-400">Dilution rows</label>
-                      <input type="number" min={1} max={12} value={spotGridConfig.rows}
-                        onChange={e => setSpotGridConfig(c => ({ ...c, rows: Math.max(1, +e.target.value) }))}
-                        className="mt-0.5 w-full rounded border border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-bg)] px-2 py-1 text-xs" />
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-gray-400">Replicate columns</label>
-                      <input type="number" min={1} max={12} value={spotGridConfig.cols}
-                        onChange={e => setSpotGridConfig(c => ({ ...c, cols: Math.max(1, +e.target.value) }))}
-                        className="mt-0.5 w-full rounded border border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-bg)] px-2 py-1 text-xs" />
-                    </div>
-                  </div>
-
-                  {/* Dilution series */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[11px] text-gray-400">Row 1 dilution (10^n)</label>
-                      <input type="number" min={-12} max={12} value={spotGridConfig.baseExp}
-                        onChange={e => setSpotGridConfig(c => ({ ...c, baseExp: +e.target.value }))}
-                        className="mt-0.5 w-full rounded border border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-bg)] px-2 py-1 text-xs" />
-                      <p className="text-[10px] text-gray-500">0 = 1x, 3 = 1000x</p>
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-gray-400">Step per row (10^n)</label>
-                      <input type="number" min={1} max={4} value={spotGridConfig.stepExp}
-                        onChange={e => setSpotGridConfig(c => ({ ...c, stepExp: Math.max(1, +e.target.value) }))}
-                        className="mt-0.5 w-full rounded border border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-bg)] px-2 py-1 text-xs" />
-                      <p className="text-[10px] text-gray-500">1 = 10x per row</p>
-                    </div>
-                  </div>
-
-                  {/* Sample / plate IDs */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[11px] text-gray-400">Sample ID</label>
-                      <input type="number" min={1} value={spotGridConfig.sampleId}
-                        onChange={e => setSpotGridConfig(c => ({ ...c, sampleId: Math.max(1, +e.target.value) }))}
-                        className="mt-0.5 w-full rounded border border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-bg)] px-2 py-1 text-xs" />
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-gray-400">Plate ID</label>
-                      <input type="number" min={1} value={spotGridConfig.plateId}
-                        onChange={e => setSpotGridConfig(c => ({ ...c, plateId: Math.max(1, +e.target.value) }))}
-                        className="mt-0.5 w-full rounded border border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-bg)] px-2 py-1 text-xs" />
-                    </div>
-                  </div>
-
-                  {/* Grid bounds — sliders as % of image size */}
-                  {spotGridLayout && image && (() => {
-                    const iw = image.naturalWidth, ih = image.naturalHeight;
-                    const toSlider = (v: number, max: number) => Math.round((v / max) * 100);
-                    const fromSlider = (pct: number, max: number) => Math.round(pct / 100 * max);
-                    return (
-                      <div className="bg-[color:var(--color-plate-bg)] rounded p-2 flex flex-col gap-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[11px] text-gray-400 font-medium">Grid position</span>
-                          <button
-                            className="text-[10px] text-amber-400 hover:text-amber-200"
-                            onClick={() => {
-                              const circle = detectPlateCircle(image);
-                              if (circle) {
-                                const { cx, cy, radius } = circle;
-                                setSpotGridLayout({
-                                  x0: Math.round(cx - radius * 0.68),
-                                  y0: Math.round(cy - radius * 0.88),
-                                  x1: Math.round(cx + radius * 0.68),
-                                  y1: Math.round(cy + radius * 0.88),
-                                });
-                              } else {
-                                setSpotGridLayout(defaultSpotGridLayout(image));
-                              }
-                            }}
-                          >Re-fit to plate</button>
-                        </div>
-                        {[
-                          { key: "x0" as const, label: "Left edge %", max: iw },
-                          { key: "x1" as const, label: "Right edge %", max: iw },
-                          { key: "y0" as const, label: "Top edge %", max: ih },
-                          { key: "y1" as const, label: "Bottom edge %", max: ih },
-                        ].map(({ key, label, max }) => (
-                          <div key={key}>
-                            <div className="flex justify-between text-[10px] text-gray-500">
-                              <span>{label}</span>
-                              <span>{toSlider(spotGridLayout[key], max)}%</span>
-                            </div>
-                            <input type="range" min={0} max={100} step={1}
-                              value={toSlider(spotGridLayout[key], max)}
-                              onChange={e => setSpotGridLayout(l => l ? { ...l, [key]: fromSlider(+e.target.value, max) } : l)}
-                              className="w-full" />
-                          </div>
-                        ))}
-                      </div>
-                    );
-                  })()}
-
-                  {/* Spot volume */}
-                  <div>
-                    <label className="text-[11px] text-gray-400">Spot volume (mL)</label>
-                    <input type="number" step={0.001} min={0.001} value={spotGridConfig.spotVolumeMl}
-                      onChange={e => setSpotGridConfig(c => ({ ...c, spotVolumeMl: +e.target.value }))}
-                      className="mt-0.5 w-full rounded border border-[color:var(--color-plate-border)] bg-[color:var(--color-plate-bg)] px-2 py-1 text-xs" />
-                    <p className="text-[10px] text-gray-500">4 µL spot → 0.004 mL</p>
-                  </div>
-
-                  <p className="text-[11px] text-gray-500">
-                    The yellow grid shows region placement. Adjust bounds above until it fits your plate, then click <b>Detect all spots</b>.
-                  </p>
-
-                  <button
-                    type="button"
-                    onClick={handlePlaceSpotGrid}
-                    disabled={!image}
-                    className={btnClass(false, "cyan")}
-                  >
-                    <Play size={14} /> Detect all spots
-                  </button>
-
-                  {spotMeta.length > 0 && (
-                    <>
-                      <div className="text-[11px] text-gray-400 bg-[color:var(--color-plate-bg)] rounded p-2">
-                        {spotMeta.filter(m => m.countability === "countable").length} countable · {" "}
-                        {spotMeta.filter(m => m.countability === "NC").length} NC · {" "}
-                        {spotMeta.filter(m => m.countability === "sparse").length} sparse
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleExportPlateLayout}
-                        className={btnClass(false, "green")}
-                      >
-                        <Save size={14} /> Export Plate Layout CSV
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
             </Section>
 
             {/* Step 3: Active region controls */}
