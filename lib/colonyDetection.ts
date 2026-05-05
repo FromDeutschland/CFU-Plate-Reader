@@ -379,13 +379,25 @@ export function detectColonies(imageData: ImageData, params: DetectionParams, re
   const blurred = gaussianBlur(gray, w, h, params.blurRadius);
   const autoT = otsuThreshold(blurred, mask);
   const base = params.threshold > 0 ? params.threshold : autoT;
-  // Sensitivity: <1 lowers threshold (more permissive), >1 raises it
-  const t = clamp8(base * params.sensitivity);
+
+  // detectBright: colonies are BRIGHTER than background.
+  //   True when calibration is used (projection already makes colonies bright)
+  //   or when invertImage=true (user flipped a light-colony plate).
+  // Default (false): colonies are DARKER than background — detect pixels below threshold.
+  const detectBright = params.calibration != null || params.invertImage;
+
+  // Sensitivity maps the Otsu base differently per mode so the slider direction stays consistent:
+  //   slider left (< 1.0) = "more colonies"  slider right (> 1.0) = "fewer colonies"
+  // Dark mode:  higher t → more dark pixels qualify → more colonies, so invert the factor.
+  // Bright mode: higher t → fewer bright pixels qualify → fewer colonies (same as before).
+  const t = detectBright
+    ? clamp8(base * params.sensitivity)
+    : clamp8(base * (2 - params.sensitivity));
 
   let binary: Uint8Array<ArrayBufferLike> = new Uint8Array(len);
   for (let i = 0; i < len; i++) {
     if (mask && !mask[i]) { binary[i] = 0; continue; }
-    binary[i] = blurred[i] >= t ? 255 : 0;
+    binary[i] = (detectBright ? blurred[i] >= t : blurred[i] < t) ? 255 : 0;
   }
 
   if (params.watershed) {
@@ -441,7 +453,12 @@ export function detectColoniesInRegion(
   const imageData = ctx.getImageData(0, 0, w, h);
 
   const lcx = cx - x0, lcy = cy - y0;
-  const bg = params.invertImage ? 255 : 0;
+  // Outside-circle pixels must be masked by buildMaskFromImageData (pure black or pure white).
+  // Dark-colony mode (default): set outside to WHITE (255) — these are NOT dark, so they
+  //   won't be detected with the < t threshold, and buildMaskFromImageData also excludes them.
+  // Bright-colony mode (calibration / invertImage): set outside to BLACK (0).
+  const detectBright = params.calibration != null || params.invertImage;
+  const bg = detectBright ? 0 : 255;
   for (let py = 0; py < h; py++) for (let px = 0; px < w; px++) {
     const dx = px - lcx, dy = py - lcy;
     if (dx * dx + dy * dy > radius * radius) {

@@ -816,7 +816,7 @@ export default function Page() {
                     checked={invertImage}
                     onChange={(e) => setInvertImage(e.target.checked)}
                   />
-                  Invert (dark colonies on light agar)
+                  Invert (light/white colonies on dark agar)
                 </label>
                 <div className="mt-2">
                   <label className="text-xs text-gray-400 block mb-1">Quick presets</label>

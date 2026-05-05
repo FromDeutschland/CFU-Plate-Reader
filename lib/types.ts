@@ -106,15 +106,15 @@ export interface LearnedModel {
 }
 
 export const defaultDetectionParams: DetectionParams = {
-  blurRadius: 2,
+  blurRadius: 3,      // slightly more smoothing reduces speckle noise
   threshold: 0,
-  minArea: 10,
-  maxArea: 5000,
-  minCircularity: 0.45,
+  minArea: 20,        // colonies smaller than ~2.5 px radius are noise
+  maxArea: 8000,      // allow slightly larger colonies
+  minCircularity: 0.4,
   minEdgeSharpness: 0.04,
   textureCheck: true,
   watershed: true,
-  watershedMinSeparation: 14,
+  watershedMinSeparation: 10, // tighter default splits denser spot-plate clusters
   invertImage: false,
   chromaNormalize: true,
   calibration: null,
